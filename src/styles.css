@@ -1,0 +1,445 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f6f7f9;
+  color: #15171d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.shell {
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.toolbar {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin: 0 auto 18px;
+  max-width: 1180px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 24px;
+  font-weight: 740;
+  letter-spacing: 0;
+}
+
+.toolbar p {
+  color: #657083;
+  font-size: 13px;
+  margin-top: 5px;
+}
+
+.layout {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(440px, 1.1fr);
+  margin: 0 auto;
+  max-width: 1180px;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #dfe3ea;
+  border-radius: 8px;
+  box-shadow: 0 12px 34px rgba(21, 31, 48, 0.06);
+  min-width: 0;
+  padding: 18px;
+}
+
+.sectionHeader {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.sectionHeader h2 {
+  font-size: 15px;
+  font-weight: 720;
+}
+
+.sectionHeader span {
+  color: #667085;
+  font-size: 12px;
+}
+
+textarea {
+  border: 1px solid #cfd6e1;
+  border-radius: 7px;
+  min-height: 230px;
+  outline: none;
+  padding: 12px;
+  resize: vertical;
+  width: 100%;
+}
+
+textarea:focus,
+input:focus {
+  border-color: #365fe8;
+  box-shadow: 0 0 0 3px rgba(54, 95, 232, 0.13);
+}
+
+.fieldRow,
+.manualField {
+  display: block;
+  margin-top: 14px;
+}
+
+label {
+  color: #364152;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+input {
+  border: 1px solid #cfd6e1;
+  border-radius: 7px;
+  display: block;
+  margin-top: 6px;
+  outline: none;
+  padding: 10px 11px;
+  width: 100%;
+}
+
+.browserHeader {
+  margin-top: 18px;
+}
+
+.browserActions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.compactButton {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.chromeButton {
+  color: #1f2937;
+}
+
+.browserList {
+  border: 1px solid #e3e7ef;
+  border-radius: 8px;
+  max-height: 210px;
+  overflow: auto;
+}
+
+.browserItem {
+  align-items: center;
+  border-bottom: 1px solid #edf0f5;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 18px minmax(0, 1fr) 20px;
+  padding: 11px;
+}
+
+.browserItem:last-child {
+  border-bottom: 0;
+}
+
+.browserItem.selected {
+  background: #eef3ff;
+}
+
+.browserItem input {
+  margin: 0;
+  width: 16px;
+}
+
+.browserItem strong,
+.browserItem small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browserItem strong {
+  color: #202939;
+  font-size: 13px;
+}
+
+.browserItem strong em {
+  background: #e8eefb;
+  border-radius: 999px;
+  color: #3155d4;
+  display: inline-block;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 760;
+  margin-right: 8px;
+  max-width: 110px;
+  overflow: hidden;
+  padding: 2px 7px;
+  text-overflow: ellipsis;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
+.browserItem small {
+  color: #697586;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.browserMeta {
+  color: #475467 !important;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+button,
+.download {
+  align-items: center;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 720;
+  gap: 8px;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  text-decoration: none;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.primary {
+  background: #365fe8;
+  color: #ffffff;
+  flex: 1;
+}
+
+.secondary,
+.iconButton {
+  background: #eef1f6;
+  color: #263244;
+}
+
+.iconButton {
+  height: 42px;
+  padding: 0;
+  width: 42px;
+}
+
+.download {
+  background: #172033;
+  color: #ffffff;
+  font-size: 13px;
+}
+
+.excelDownload {
+  background: #067647;
+}
+
+.downloadGroup {
+  display: flex;
+  gap: 8px;
+}
+
+.statusGrid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 12px;
+}
+
+.metric {
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 22px 1fr;
+  padding: 12px;
+}
+
+.metric svg {
+  color: #365fe8;
+  grid-row: span 2;
+  margin-top: 2px;
+}
+
+.metric span {
+  color: #697586;
+  font-size: 12px;
+}
+
+.metric strong {
+  font-size: 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phaseGrid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 18px;
+}
+
+.phaseCard {
+  background: #f8fafc;
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+  padding: 11px 12px;
+}
+
+.phaseCard span,
+.phaseCard strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phaseCard span {
+  color: #697586;
+  font-size: 12px;
+}
+
+.phaseCard strong {
+  color: #1f2937;
+  font-size: 13px;
+  margin-top: 5px;
+}
+
+.seedList {
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+  max-height: 210px;
+  overflow: auto;
+}
+
+.seedRow {
+  align-items: center;
+  border-bottom: 1px solid #edf0f5;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 10px 11px;
+}
+
+.seedRow:last-child {
+  border-bottom: 0;
+}
+
+.seedRow span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seedRow strong {
+  color: #365fe8;
+}
+
+.seedRow.done strong {
+  color: #067647;
+}
+
+.seedRow.error strong {
+  color: #b42318;
+}
+
+.logHeader {
+  margin-top: 18px;
+}
+
+.logBox {
+  background: #111827;
+  border-radius: 8px;
+  color: #d7dde8;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  height: 310px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.logLine {
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.logLine.success {
+  color: #8ff0b2;
+}
+
+.logLine.warn {
+  color: #f8d77c;
+}
+
+.logLine.error {
+  color: #ffaaa4;
+}
+
+.empty {
+  color: #697586;
+  font-size: 13px;
+  padding: 13px;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 880px) {
+  .shell {
+    padding: 14px;
+  }
+
+  .layout,
+  .statusGrid,
+  .phaseGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar {
+    align-items: flex-start;
+    gap: 12px;
+  }
+}
