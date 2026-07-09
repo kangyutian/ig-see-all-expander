@@ -91,6 +91,8 @@ Excel 默认只包含拓展出来的账号，不包含输入的种子账号。
 - 已安装 AllweTouch / YunBrowser 或 Google Chrome。
 - 在对应浏览器里登录 Instagram。
 
+如果目标电脑没有 Node.js，双击 `start.bat` 时会自动打开 Node.js 下载页。安装 Node.js LTS 后，关闭命令行窗口，再重新双击 `start.bat`。
+
 换电脑后直接双击 `start.bat`。如果使用 Chrome，点击 `Launch Chrome` 后需要在新窗口重新登录 Instagram。
 
 ## 常见问题

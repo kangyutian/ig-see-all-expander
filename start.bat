@@ -4,7 +4,15 @@ cd /d "%~dp0"
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo Node.js was not found. Install Node.js LTS first, then run this file again.
+  echo.
+  echo [Missing dependency]
+  echo Node.js was not found on this computer.
+  echo.
+  echo Please install Node.js LTS first, then double-click start.bat again.
+  echo Download page will open now:
+  echo https://nodejs.org/
+  echo.
+  start "" "https://nodejs.org/"
   pause
   exit /b 1
 )
