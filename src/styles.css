@@ -51,6 +51,18 @@ h1 {
   margin-top: 5px;
 }
 
+.toolbarActions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.versionBadge {
+  color: #667085;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .layout {
   display: grid;
   gap: 18px;
@@ -441,5 +453,10 @@ button:disabled {
   .toolbar {
     align-items: flex-start;
     gap: 12px;
+  }
+
+  .toolbarActions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 }

@@ -1,38 +1,41 @@
 # IG See All Expander
 
-本地 Instagram `Suggested for you -> See all` 全量 handle 抓取小程序。
+Windows 桌面版 Instagram `Suggested for you -> See all` 全量 handle 抓取工具。
 
-## 启动方式
+程序连接本机已经登录 Instagram 的 AllweTouch、YunBrowser 或专用 Chrome，逐个处理种子账号，滚动 `Suggested for you` 弹窗到底，并导出 TXT 和 Excel。
 
-双击 `start.bat`。网页打开后访问：
+## Windows 桌面版
 
-```text
-http://127.0.0.1:4761
-```
+普通用户推荐从 GitHub Releases 下载以下任一文件：
 
-首次启动会自动安装依赖、构建前端并启动本地服务。
+- `IG-See-All-Expander-Setup-x.x.x.exe`：安装版，创建桌面和开始菜单快捷方式。
+- `IG-See-All-Expander-Portable-x.x.x.exe`：免安装便携版，双击即可运行。
+
+两个版本都已经包含运行环境，目标电脑不需要安装 Node.js，也不需要运行 `start.bat`。
+
+第一版未使用商业代码签名证书。如果 Windows SmartScreen 显示“未知发布者”，请确认文件来自本仓库的 Releases 页面，然后点击“更多信息 -> 仍要运行”。
 
 ## 浏览器连接
 
-程序支持两种浏览器来源：
+### AllweTouch / YunBrowser
 
-1. `AllweTouch / YunBrowser`
-   - 打开 AllweTouch / YunBrowser。
-   - 在里面登录 Instagram。
-   - 回到小程序点击 `Scan`。
-   - 程序会自动读取 `DevToolsActivePort` 并识别可控制的 Instagram 会话。
+1. 打开 AllweTouch 或 YunBrowser。
+2. 在其中登录 Instagram，并保留一个 Instagram 标签页。
+3. 打开本软件，点击 `Scan`。
+4. 选择显示已检测到 Session Cookie 的浏览器会话。
 
-2. `Chrome`
-   - 普通已经打开的 Chrome 默认没有调试接口，程序不能直接接管。
-   - 推荐点击小程序里的 `Launch Chrome`。
-   - 程序会打开一个专用 Chrome 窗口，并自动配置调试端口。
-   - 在这个新 Chrome 窗口里登录 Instagram，然后回到小程序点击 `Scan`。
+### 专用 Chrome
 
-专用 Chrome 的登录状态会保存在小程序目录下的 `chrome-profile/`。程序不会保存 Instagram 密码，只保存浏览器自己的 Cookie 和登录状态。
+1. 点击软件中的 `Launch Chrome`。
+2. 在新打开的 Chrome 窗口中登录 Instagram。
+3. 回到软件点击 `Scan`。
+4. 选择该 Chrome 会话后开始任务。
 
-如果你已经手动用 `--remote-debugging-port` 启动了 Chrome，小程序也会在扫描时自动识别。
+普通方式打开的 Chrome 默认没有调试接口，软件无法直接控制。请使用 `Launch Chrome` 启动专用窗口，或者自行使用 `--remote-debugging-port` 启动 Chrome。
 
-## 输入格式
+软件不会保存 Instagram 密码。专用 Chrome 的 Cookie 和登录状态保存在当前 Windows 用户的本地数据目录中。
+
+## 输入与抓取规则
 
 支持 handle、`@handle`、Instagram profile URL、逗号、空格和换行混合输入：
 
@@ -43,79 +46,93 @@ https://www.instagram.com/the_vintage_tourists/
 richardheeps, kait.holt
 ```
 
-## 抓取规则
-
-程序会逐个种子账号执行：
+每个种子账号严格执行：
 
 ```text
 打开 profile
 点击 Similar accounts
 点击 Suggested for you 区域的 See all
-进入 Suggested for you 弹窗
-滚动弹窗内部列表到底
+确认进入 Suggested for you 弹窗
+只滚动弹窗内部列表，直到滚动位置和新增 handle 都停止变化
 抓取弹窗中的 profile handle
+排除种子账号和 Instagram 保留路径
 全局去重
 导出 TXT
 补充粉丝量和 bio 邮箱
 导出 Excel
 ```
 
-程序不会点击 `Follow`，不会发送私信，也不会接管登录密码。
+程序不会点击 `Follow`，也不会发送私信。单个账号失败时会记录日志并继续处理后续账号。
 
 ## 输出文件
 
-网页完成后会出现两个下载按钮：
+- TXT：只包含 handle，每行一个，没有表头、来源或重复项。
+- Excel：只包含 `handle`、`followers`、`email` 三列。
+- `followers` 抓不到时写 `未知`。
+- `email` 只从 Instagram bio 提取，没有时写 `没有`；多个邮箱使用 `; ` 分隔。
 
-- `TXT`：只包含 handle list，每行一个，没有表头。
-- `Excel`：包含三列：
+软件右上角提供“打开输出文件夹”和“打开日志文件夹”按钮。
+
+桌面版数据保存在：
 
 ```text
-handle | followers | email
+%LOCALAPPDATA%\IG See All Expander\
+├─ chrome-profile\
+├─ outputs\
+├─ logs\
+└─ config.json
 ```
 
-Excel 默认只包含拓展出来的账号，不包含输入的种子账号。
+升级或重新安装软件不会删除这些文件。第一次从旧源码版切换到桌面版时，专用 Chrome 需要重新登录一次；AllweTouch/YunBrowser 的登录状态不受影响。
 
-- `followers`：优先从 Instagram profile API 获取；抓不到时写 `未知`。
-- `email`：只从 Instagram bio 文本提取；没有邮箱时写 `没有`。
-- 如果 bio 里有多个邮箱，会用 `; ` 分隔。
+## 源码开发
 
-服务端也会在 `outputs/` 目录保留同一份 TXT 和 Excel 文件。
+源码模式需要 Node.js 22 或更高版本：
 
-## 换电脑使用
+```powershell
+npm install
+npm run build
+npm start
+```
 
-复制整个 `ig-see-all-expander` 文件夹到另一台 Windows 电脑。
+也可以双击 `start.bat`。服务启动后会生成一次性本地令牌并自动打开页面。
 
-目标电脑需要：
+常用命令：
 
-- 已安装 Node.js LTS。
-- 已安装 AllweTouch / YunBrowser 或 Google Chrome。
-- 在对应浏览器里登录 Instagram。
+```powershell
+npm test
+npm run desktop
+npm run pack:win
+npm run dist:win
+```
 
-如果目标电脑没有 Node.js，双击 `start.bat` 时会自动打开 Node.js 下载页。安装 Node.js LTS 后，关闭命令行窗口，再重新双击 `start.bat`。
+- `npm run desktop`：构建前端并用 Electron 启动。
+- `npm run pack:win`：生成未安装的测试目录。
+- `npm run dist:win`：在 `release/` 生成 Windows 安装版和便携版。
 
-换电脑后直接双击 `start.bat`。如果使用 Chrome，点击 `Launch Chrome` 后需要在新窗口重新登录 Instagram。
+## GitHub 发布
+
+推送 `v*` 标签时，`.github/workflows/windows-release.yml` 会在 Windows 构建机上运行测试、生成两个 `.exe` 文件和 `SHA256SUMS.txt`，并上传到对应 GitHub Release。
+
+示例：
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+也可以在 GitHub Actions 页面手动运行工作流，只生成可下载的 Workflow Artifact，不创建正式 Release。
 
 ## 常见问题
 
-### 扫描不到 AllweTouch
+### 扫描不到浏览器
 
-确认 AllweTouch / YunBrowser 已打开，并且里面有已登录的 Instagram 页面。然后回到小程序点击 `Scan`。
-
-### 普通 Chrome 为什么扫描不到
-
-普通 Chrome 默认不会开放 CDP 调试端口，所以小程序不能直接控制。请点击 `Launch Chrome`，使用程序启动的专用 Chrome 窗口。
-
-### 扫描到了 9222 但不是 Chrome
-
-有些 Electron 软件也会占用 9222 端口。小程序会显示浏览器类型和 Instagram 标签页数量，默认优先选择已登录 Instagram 的 AllweTouch/YunBrowser/Chrome 会话。
+确认浏览器中已经打开 Instagram 页面。AllweTouch/YunBrowser 可以直接扫描；普通 Chrome 请使用软件中的 `Launch Chrome`。
 
 ### 某个账号抓取为 0
 
-常见原因：
+可能是该 profile 没有 Similar accounts、Instagram 没有展示 `See all`、页面加载受限或登录状态失效。软件会在日志中记录具体失败原因。
 
-- 该 profile 没有 Similar accounts 入口。
-- Instagram 没有展示 `See all`。
-- 页面加载慢或被限制。
-- 当前登录状态失效。
+### 安装版提示未知发布者
 
-程序会记录日志并继续跑后面的账号。
+这是因为第一版没有商业代码签名证书，不代表软件需要联网安装其他运行环境。请只从本仓库的 GitHub Release 下载，并可使用 `SHA256SUMS.txt` 校验文件完整性。

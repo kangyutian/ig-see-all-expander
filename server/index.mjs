@@ -1,19 +1,26 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, "..");
-const distDir = path.join(rootDir, "dist");
-const outputDir = path.join(rootDir, "outputs");
-const chromeProfileDir = path.join(rootDir, "chrome-profile");
-const host = "127.0.0.1";
-const port = Number(process.env.PORT || 4761);
-
-fs.mkdirSync(outputDir, { recursive: true });
+const sourceRootDir = path.resolve(__dirname, "..");
+const sourcePackage = JSON.parse(fs.readFileSync(path.join(sourceRootDir, "package.json"), "utf8"));
+let distDir = path.join(sourceRootDir, "dist");
+let dataDir = sourceRootDir;
+let outputDir = path.join(sourceRootDir, "outputs");
+let chromeProfileDir = path.join(sourceRootDir, "chrome-profile");
+let logDir = sourceRootDir;
+let host = "127.0.0.1";
+let port = Number(process.env.PORT || 4761);
+let apiToken = "";
+let runtimeMode = "source";
+let appVersion = sourcePackage.version || "0.1.0";
+let openPathHandler = null;
+let server = null;
 
 const jobs = new Map();
 let nextJobId = 1;
@@ -39,9 +46,12 @@ const reservedHandles = new Set([
   "web",
 ]);
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || `${host}:${port}`}`);
+    if (url.pathname.startsWith("/api/") && !isAuthorizedRequest(req, url)) {
+      return sendJson(res, 401, { error: "Unauthorized local app request." });
+    }
     if (url.pathname === "/api/browser/discover" && req.method === "GET") {
       return sendJson(res, 200, { browsers: await discoverBrowsers() });
     }
@@ -84,16 +94,92 @@ const server = http.createServer(async (req, res) => {
       emit(job, "log", { level: "warn", message: "Cancel requested. The current browser step will stop soon." });
       return sendJson(res, 200, { ok: true });
     }
+    if (url.pathname === "/api/system/open-outputs" && req.method === "POST") {
+      await openDirectory(outputDir);
+      return sendJson(res, 200, { ok: true, path: outputDir });
+    }
+    if (url.pathname === "/api/system/open-logs" && req.method === "POST") {
+      await openDirectory(logDir);
+      return sendJson(res, 200, { ok: true, path: logDir });
+    }
+    if (url.pathname === "/api/system/info" && req.method === "GET") {
+      return sendJson(res, 200, {
+        name: "IG See All Expander",
+        version: appVersion,
+        mode: runtimeMode,
+        dataDir,
+        outputDir,
+        logDir,
+      });
+    }
     return serveStatic(url.pathname, res);
   } catch (error) {
-    console.error(error);
+    logRuntime("error", error?.stack || error?.message || String(error));
     return sendJson(res, 500, { error: String(error?.message || error) });
   }
-});
+}
 
-server.listen(port, host, () => {
-  console.log(`IG See All Expander running at http://${host}:${port}`);
-});
+export async function startLocalServer(options = {}) {
+  if (server?.listening) throw new Error("IG See All Expander local server is already running.");
+
+  distDir = path.resolve(options.distDir || path.join(sourceRootDir, "dist"));
+  dataDir = path.resolve(options.dataDir || sourceRootDir);
+  outputDir = path.resolve(options.outputDir || path.join(dataDir, "outputs"));
+  chromeProfileDir = path.resolve(options.chromeProfileDir || path.join(dataDir, "chrome-profile"));
+  logDir = path.resolve(options.logDir || path.join(dataDir, "logs"));
+  host = options.host || "127.0.0.1";
+  port = Number.isFinite(Number(options.port)) ? Number(options.port) : Number(process.env.PORT || 4761);
+  apiToken = String(options.token || "");
+  runtimeMode = options.mode || "source";
+  appVersion = options.version || sourcePackage.version || "0.1.0";
+  openPathHandler = typeof options.openPath === "function" ? options.openPath : null;
+
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(chromeProfileDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+  jobs.clear();
+  nextJobId = 1;
+
+  server = http.createServer(handleRequest);
+  await new Promise((resolve, reject) => {
+    const handleError = (error) => reject(error);
+    server.once("error", handleError);
+    server.listen(port, host, () => {
+      server.off("error", handleError);
+      resolve();
+    });
+  });
+  const address = server.address();
+  port = typeof address === "object" && address ? address.port : port;
+  const url = `http://${host}:${port}`;
+  logRuntime("info", `Local service started at ${url} (${runtimeMode}).`);
+
+  return {
+    host,
+    port,
+    url,
+    token: apiToken,
+    async close() {
+      if (!server?.listening) return;
+      for (const job of jobs.values()) {
+        job.cancelled = true;
+        for (const client of job.clients) client.end();
+        job.clients.clear();
+      }
+      await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections?.();
+      });
+      logRuntime("info", "Local service stopped.");
+      server = null;
+    },
+  };
+}
+
+export function createAccessToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
 async function discoverBrowsers() {
   const profileDirs = new Map();
@@ -935,6 +1021,38 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+function isAuthorizedRequest(req, url) {
+  if (!apiToken) return true;
+  const provided = String(req.headers["x-app-token"] || url.searchParams.get("token") || "");
+  const expectedBuffer = Buffer.from(apiToken);
+  const providedBuffer = Buffer.from(provided);
+  return expectedBuffer.length === providedBuffer.length && crypto.timingSafeEqual(expectedBuffer, providedBuffer);
+}
+
+async function openDirectory(targetPath) {
+  fs.mkdirSync(targetPath, { recursive: true });
+  if (openPathHandler) {
+    const error = await openPathHandler(targetPath);
+    if (error) throw new Error(error);
+    return;
+  }
+  if (process.platform !== "win32") throw new Error("Opening folders is currently supported on Windows only.");
+  const child = spawn("explorer.exe", [targetPath], { detached: true, stdio: "ignore", windowsHide: false });
+  child.unref();
+}
+
+function logRuntime(level, message) {
+  const line = `[${new Date().toISOString()}] [${String(level).toUpperCase()}] ${String(message)}\n`;
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, "app.log"), line, "utf8");
+  } catch {
+    // Logging must never interrupt a capture job.
+  }
+  if (level === "error") console.error(message);
+  else console.log(message);
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -1024,4 +1142,31 @@ function timestampForFile() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  const token = createAccessToken();
+  startLocalServer({
+    token,
+    port: Number(process.env.PORT || 4761),
+    mode: "source",
+    version: process.env.npm_package_version || sourcePackage.version || "0.1.0",
+  })
+    .then(({ url }) => {
+      const appUrl = `${url}/?token=${encodeURIComponent(token)}`;
+      console.log(`IG See All Expander running at ${appUrl}`);
+      if (process.env.OPEN_BROWSER !== "0" && process.platform === "win32") {
+        const child = spawn("rundll32.exe", ["url.dll,FileProtocolHandler", appUrl], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.unref();
+      }
+    })
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
 }

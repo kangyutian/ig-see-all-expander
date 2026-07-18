@@ -1,7 +1,11 @@
 node_modules/
 dist/
+release/
 outputs/
 chrome-profile/
+logs/
+output/
+.playwright-cli/
 
 *.log
 server.log
