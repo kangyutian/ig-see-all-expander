@@ -17,7 +17,7 @@
     "desktop": "npm run build && electron .",
     "test": "node --test server/*.test.mjs",
     "pack:win": "npm run build && electron-builder --win dir --x64",
-    "dist:win": "npm run build && electron-builder --win nsis portable --x64"
+    "dist:win": "npm run build && electron-builder --win nsis portable --x64 --publish never"
   },
   "dependencies": {
     "exceljs": "^4.4.0"
