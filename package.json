@@ -1,20 +1,77 @@
 {
   "name": "ig-see-all-expander",
-  "version": "0.1.0",
+  "productName": "IG See All Expander",
+  "version": "0.2.0",
+  "description": "Windows desktop tool for full Instagram Suggested for you handle capture and profile enrichment.",
+  "author": "kangyutian",
   "private": true,
   "type": "module",
+  "main": "electron/main.mjs",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "start": "node server/index.mjs"
+    "start": "node server/index.mjs",
+    "desktop": "npm run build && electron .",
+    "test": "node --test server/*.test.mjs",
+    "pack:win": "npm run build && electron-builder --win dir --x64",
+    "dist:win": "npm run build && electron-builder --win nsis portable --x64"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.0.0",
-    "exceljs": "^4.4.0",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.6.3",
-    "vite": "^5.4.21"
+    "vite": "^8.1.5"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
+  "build": {
+    "appId": "com.kangyutian.igseeallexpander",
+    "productName": "IG See All Expander",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "IG-See-All-Expander-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "IG See All Expander"
+    },
+    "portable": {
+      "artifactName": "IG-See-All-Expander-Portable-${version}.${ext}"
+    }
   }
 }

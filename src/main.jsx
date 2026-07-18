@@ -5,14 +5,18 @@ import {
   CheckCircle2,
   Chrome,
   Download,
+  FolderOpen,
   Loader2,
   Play,
   Radar,
   RefreshCw,
+  ScrollText,
   Square,
   TerminalSquare,
 } from "lucide-react";
 import "./styles.css";
+
+const appToken = new URLSearchParams(window.location.search).get("token") || "";
 
 const sampleHandles = [
   "the_vintage_tourists",
@@ -39,6 +43,7 @@ function App() {
   const [enrichProgress, setEnrichProgress] = useState(null);
   const [logs, setLogs] = useState([]);
   const [seedStats, setSeedStats] = useState({});
+  const [systemInfo, setSystemInfo] = useState(null);
   const eventSourceRef = useRef(null);
   const logEndRef = useRef(null);
 
@@ -46,6 +51,7 @@ function App() {
   const activeCdpUrl = manualCdpUrl.trim() || selectedCdpUrl;
 
   useEffect(() => {
+    loadSystemInfo();
     discoverBrowsers();
     return () => eventSourceRef.current?.close();
   }, []);
@@ -94,6 +100,23 @@ function App() {
     }
   }
 
+  async function loadSystemInfo() {
+    try {
+      setSystemInfo(await apiGet("/api/system/info"));
+    } catch (error) {
+      addLog(error.message || String(error), "warn");
+    }
+  }
+
+  async function openSystemFolder(kind) {
+    try {
+      const data = await apiPost(`/api/system/open-${kind}`, {});
+      addLog(`Opened ${kind} folder: ${data.path}`, "success");
+    } catch (error) {
+      addLog(error.message || String(error), "error");
+    }
+  }
+
   async function startJob() {
     if (!normalizedPreview.length) {
       addLog("Enter at least one Instagram handle.", "error");
@@ -130,7 +153,7 @@ function App() {
   }
 
   function attachEvents(id) {
-    const source = new EventSource(`/api/jobs/${id}/events`);
+    const source = new EventSource(apiUrl(`/api/jobs/${id}/events`));
     eventSourceRef.current = source;
     source.addEventListener("status", (event) => {
       const data = JSON.parse(event.data);
@@ -194,9 +217,18 @@ function App() {
           <h1>IG See All Expander</h1>
           <p>AllweTouch session scanner · See all capture · Excel enrichment</p>
         </div>
-        <button className="iconButton" onClick={discoverBrowsers} disabled={discovering} title="Scan browser sessions">
-          {discovering ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
-        </button>
+        <div className="toolbarActions">
+          {systemInfo && <span className="versionBadge">v{systemInfo.version} · {systemInfo.mode}</span>}
+          <button className="iconButton" onClick={() => openSystemFolder("outputs")} title="Open output folder">
+            <FolderOpen size={18} />
+          </button>
+          <button className="iconButton" onClick={() => openSystemFolder("logs")} title="Open log folder">
+            <ScrollText size={18} />
+          </button>
+          <button className="iconButton" onClick={discoverBrowsers} disabled={discovering} title="Scan browser sessions">
+            {discovering ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
+          </button>
+        </div>
       </section>
 
       <section className="layout">
@@ -309,11 +341,11 @@ function App() {
             <h2>Seed Status</h2>
             {complete && jobId ? (
               <div className="downloadGroup">
-                <a className="download" href={`/api/jobs/${jobId}/download`}>
+                <a className="download" href={apiUrl(`/api/jobs/${jobId}/download`)}>
                   <Download size={17} />
                   TXT
                 </a>
-                <a className="download excelDownload" href={`/api/jobs/${jobId}/download-excel`}>
+                <a className="download excelDownload" href={apiUrl(`/api/jobs/${jobId}/download-excel`)}>
                   <Download size={17} />
                   Excel
                 </a>
@@ -403,21 +435,31 @@ function normalizeHandles(value) {
 }
 
 async function apiGet(url) {
-  const response = await fetch(url);
+  const response = await fetch(apiUrl(url), { headers: apiHeaders() });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
 
 async function apiPost(url, body) {
-  const response = await fetch(url, {
+  const response = await fetch(apiUrl(url), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...apiHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
+}
+
+function apiHeaders() {
+  return appToken ? { "X-App-Token": appToken } : {};
+}
+
+function apiUrl(value) {
+  const url = new URL(value, window.location.origin);
+  if (appToken) url.searchParams.set("token", appToken);
+  return `${url.pathname}${url.search}`;
 }
 
 createRoot(document.getElementById("root")).render(<App />);
