@@ -1167,24 +1167,29 @@ async function getOrOpenInstagramTab(cdpUrl, seed) {
 async function clickSimilarAccounts(cdp) {
   const result = await evaluate(cdp, `(() => {
     window.scrollTo(0, 0);
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
     const candidates = [...document.querySelectorAll('[role=button], button')]
       .map((el) => {
         const r = el.getBoundingClientRect();
-        return { el, text: (el.innerText || el.textContent || '').trim(), aria: el.getAttribute('aria-label') || '', r };
+        return {
+          el,
+          text: (el.innerText || el.textContent || '').trim(),
+          aria: el.getAttribute('aria-label') || el.getAttribute('title') || '',
+          r
+        };
       })
       .filter((x) => x.r.width > 20 && x.r.height > 20 && x.r.top < 430);
     const target =
-      candidates.find((x) => /similar accounts/i.test(x.text || x.aria)) ||
-      candidates.find((x) => !/follow|message|options/i.test(x.text) && x.r.left > 900 && x.r.top > 220 && x.r.width <= 90);
+      candidates.find((x) => /similar accounts|discover people|suggested accounts|\u63a8\u8350|\u76f8\u4f3c/i.test((x.text || '') + ' ' + (x.aria || ''))) ||
+      candidates
+        .filter((x) => !/follow|message|options|more|\u5173\u6ce8|\u6d88\u606f|\u66f4\u591a/i.test((x.text || '') + ' ' + (x.aria || '')))
+        .filter((x) => x.r.left > viewportWidth * 0.52 && x.r.top > 180 && x.r.width <= 110 && x.r.height <= 70)
+        .sort((a, b) => b.r.left - a.r.left)[0];
     if (!target) return null;
-    const x = target.r.left + target.r.width / 2;
-    const y = target.r.top + target.r.height / 2;
-    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
-      target.el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
-    }
-    return { x, y };
+    return { x: target.r.left + target.r.width / 2, y: target.r.top + target.r.height / 2 };
   })()`);
   if (!result) return false;
+  await mouseClick(cdp, result);
   return true;
 }
 
@@ -1199,14 +1204,10 @@ async function clickSeeAll(cdp) {
       .sort((a, b) => a.r.top - b.r.top);
     const target = candidates[0];
     if (!target) return null;
-    const x = target.r.left + target.r.width / 2;
-    const y = target.r.top + target.r.height / 2;
-    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
-      target.el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
-    }
-    return { x, y };
+    return { x: target.r.left + target.r.width / 2, y: target.r.top + target.r.height / 2 };
   })()`);
   if (!result) return false;
+  await mouseClick(cdp, result);
   return true;
 }
 
@@ -1422,7 +1423,20 @@ function downloadExcelJob(jobId, res) {
 function emit(job, type, data) {
   const event = { type, data: { ...data, at: new Date().toISOString() } };
   job.events.push(event);
+  persistJobEvent(job, type, event.data);
   for (const client of job.clients) writeSse(client, type, event.data);
+}
+
+function persistJobEvent(job, type, data) {
+  if (!["log", "seed:error", "error", "done"].includes(type)) return;
+  const level = type === "seed:error" || type === "error" ? "warn" : data.level || "info";
+  const message =
+    type === "seed:error"
+      ? `Job ${job.id} @${data.seed}: ${data.error}`
+      : type === "done"
+        ? `Job ${job.id} ${data.status}: ${data.count} handle(s).`
+        : `Job ${job.id}: ${data.message || data.error || JSON.stringify(data)}`;
+  logRuntime(level, message);
 }
 
 function writeSse(res, type, data) {
