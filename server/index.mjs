@@ -1040,22 +1040,36 @@ async function enrichHandles({ session, handles, job }) {
       const handle = handles[index];
       if (job.cancelled) break;
       emit(job, "enrich:progress", { index: index + 1, total: handles.length, handle });
+      let pageInfo = { followers: null, following: null, bio: "", contactText: "", bioExpanded: false };
       try {
-        const info = await getProfileInfoByApi(page, handle);
+        pageInfo = await getProfileInfoByPage(page, handle);
+        emit(job, "enrich:progress", {
+          index: index + 1,
+          total: handles.length,
+          handle,
+          pageChecked: true,
+          bioExpanded: pageInfo.bioExpanded,
+          contactOpened: pageInfo.contactOpened,
+        });
+      } catch (error) {
+        emit(job, "log", { level: "warn", message: `Profile page fallback for @${handle}: ${String(error?.message || error)}` });
+      }
+      try {
+        const apiInfo = await getProfileInfoByApi(page, handle);
+        const info = mergeProfileInfo(apiInfo, pageInfo);
         rows.push({
           handle,
           followers: formatCount(info.followers),
           following: formatCount(info.following),
-          email: extractEmails(info.bio).join("; ") || "\u6ca1\u6709",
+          email: collectProfileEmails(info).join("; ") || "\u6ca1\u6709",
         });
       } catch (error) {
-        emit(job, "log", { level: "warn", message: `Profile fallback for @${handle}: ${String(error?.message || error)}` });
-        const fallback = await getProfileInfoByPage(page, handle).catch(() => ({ followers: null, following: null, bio: "" }));
+        emit(job, "log", { level: "warn", message: `Profile API fallback for @${handle}: ${String(error?.message || error)}` });
         rows.push({
           handle,
-          followers: formatCount(fallback.followers),
-          following: formatCount(fallback.following),
-          email: extractEmails(fallback.bio).join("; ") || "\u6ca1\u6709",
+          followers: formatCount(pageInfo.followers),
+          following: formatCount(pageInfo.following),
+          email: collectProfileEmails(pageInfo).join("; ") || "\u6ca1\u6709",
         });
       }
       await sleep(450);
@@ -1124,7 +1138,10 @@ async function getProfileInfoByApi(cdp, handle) {
       return {
         followers: user.edge_followed_by?.count ?? null,
         following: user.edge_follow?.count ?? null,
-        bio: user.biography || ''
+        bio: user.biography || '',
+        businessEmail: user.business_email || '',
+        publicEmail: user.public_email || '',
+        profileContactEmail: user.profile_contact_info?.email_address || user.contact_info?.email_address || ''
       };
     })()`
   );
@@ -1133,12 +1150,36 @@ async function getProfileInfoByApi(cdp, handle) {
 async function getProfileInfoByPage(cdp, handle) {
   await cdp.send("Page.navigate", { url: `https://www.instagram.com/${handle}/` }).catch(() => {});
   await sleep(3500);
+  const bioExpanded = await expandProfileBio(cdp).catch(() => false);
+  if (bioExpanded) await sleep(350);
+  let info = await readProfilePageInfo(cdp);
+  let contactOpened = false;
+  if (!collectProfileEmails(info).length) {
+    contactOpened = await openProfileContactDetails(cdp).catch(() => false);
+    if (contactOpened) {
+      await sleep(500);
+      info = mergeProfileInfo(info, await readProfilePageInfo(cdp));
+    }
+  }
+  return { ...info, bioExpanded, contactOpened };
+}
+
+async function readProfilePageInfo(cdp) {
   return evaluate(
     cdp,
     `(() => {
       const text = document.body?.innerText || '';
       const metadata = document.querySelector('meta[property="og:description"]')?.content || '';
       const source = metadata + '\n' + text;
+      const mailto = [...document.querySelectorAll('a[href^="mailto:"]')]
+        .map((node) => {
+          const value = (node.getAttribute('href') || '').replace(/^mailto:/i, '').split('?')[0];
+          try { return decodeURIComponent(value); } catch { return value; }
+        })
+        .filter(Boolean);
+      const dialogText = [...document.querySelectorAll('[role="dialog"]')]
+        .map((node) => node.innerText || node.textContent || '')
+        .join('\n');
       const readCount = (hrefPart, labelPattern) => {
         const link = [...document.querySelectorAll('a[href]')]
           .find((node) => (node.getAttribute('href') || '').includes(hrefPart));
@@ -1150,10 +1191,57 @@ async function getProfileInfoByPage(cdp, handle) {
       return {
         followers: readCount('/followers/', 'followers|\\u7c89\\u4e1d|\\u7c89\\u7d72'),
         following: readCount('/following/', 'following|\\u5173\\u6ce8|\\u95dc\\u6ce8|\\u8ffd\\u8e64\\u4e2d|\\u8ffd\\u8e2a'),
-        bio: text.slice(0, 1800)
+        bio: text.slice(0, 2400),
+        contactText: mailto.join('\n') + '\n' + dialogText
       };
     })()`
   );
+}
+
+async function expandProfileBio(cdp) {
+  const target = await evaluate(cdp, `(() => {
+    const pattern = /^(more|see more|read more|\\u66f4\\u591a|\\u67e5\\u770b\\u66f4\\u591a|plus|mehr|altro|mais|m\\u00e1s)$/i;
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const candidates = [...document.querySelectorAll('button, [role="button"], span')]
+      .map((node) => {
+        const clickable = node.closest('button, [role="button"]') || node;
+        const rect = clickable.getBoundingClientRect();
+        return { clickable, text: normalize(node.innerText || node.textContent), rect };
+      })
+      .filter((item) => pattern.test(item.text))
+      .filter((item) => item.rect.width > 8 && item.rect.height > 8 && item.rect.bottom > 0 && item.rect.top < Math.min(window.innerHeight, 760))
+      .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+    const item = candidates[0];
+    if (!item) return null;
+    return { x: item.rect.left + item.rect.width / 2, y: item.rect.top + item.rect.height / 2, label: item.text };
+  })()`);
+  if (!target) return false;
+  await mouseClick(cdp, target);
+  return true;
+}
+
+async function openProfileContactDetails(cdp) {
+  const target = await evaluate(cdp, `(() => {
+    const pattern = /^(contact|contact options|email|e-mail|\\u8054\\u7cfb|\\u806f\\u7d61|\\u8054\\u7cfb\\u65b9\\u5f0f|\\u806f\\u7d61\\u65b9\\u5f0f|\\u7535\\u5b50\\u90ae\\u4ef6|\\u96fb\\u5b50\\u90f5\\u4ef6)$/i;
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const candidates = [...document.querySelectorAll('button, [role="button"], a')]
+      .map((node) => ({
+        node,
+        text: normalize(node.innerText || node.textContent || node.getAttribute('aria-label')),
+        href: node.getAttribute('href') || '',
+        rect: node.getBoundingClientRect()
+      }))
+      .filter((item) => pattern.test(item.text))
+      .filter((item) => !/^mailto:/i.test(item.href))
+      .filter((item) => item.rect.width > 12 && item.rect.height > 8 && item.rect.bottom > 0 && item.rect.top < Math.min(window.innerHeight, 760))
+      .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+    const item = candidates[0];
+    if (!item) return null;
+    return { x: item.rect.left + item.rect.width / 2, y: item.rect.top + item.rect.height / 2, label: item.text };
+  })()`);
+  if (!target) return false;
+  await mouseClick(cdp, target);
+  return true;
 }
 
 export async function writeExcel(filePath, rows) {
@@ -1838,6 +1926,30 @@ function safeOutputName(value) {
 function extractEmails(text) {
   const matches = String(text || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
   return [...new Set(matches.map((email) => email.toLowerCase().replace(/[.,;:)]$/, "")))];
+}
+
+export function collectProfileEmails(info = {}) {
+  return extractEmails([
+    info.bio,
+    info.businessEmail,
+    info.publicEmail,
+    info.profileContactEmail,
+    info.contactText,
+  ].filter(Boolean).join("\n"));
+}
+
+function mergeProfileInfo(primary = {}, fallback = {}) {
+  const preferCount = (first, second) => first !== null && first !== undefined && first !== "" ? first : second;
+  return {
+    followers: preferCount(primary.followers, fallback.followers),
+    following: preferCount(primary.following, fallback.following),
+    bio: [primary.bio, fallback.bio].filter(Boolean).join("\n"),
+    businessEmail: [primary.businessEmail, fallback.businessEmail].filter(Boolean).join("\n"),
+    publicEmail: [primary.publicEmail, fallback.publicEmail].filter(Boolean).join("\n"),
+    profileContactEmail: [primary.profileContactEmail, fallback.profileContactEmail].filter(Boolean).join("\n"),
+    contactText: [primary.contactText, fallback.contactText].filter(Boolean).join("\n"),
+    bioExpanded: Boolean(primary.bioExpanded || fallback.bioExpanded),
+  };
 }
 
 function formatCount(value) {

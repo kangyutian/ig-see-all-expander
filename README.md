@@ -81,7 +81,8 @@ extract profile links from the dialog
 exclude seed handles and Instagram reserved paths
 deduplicate globally
 write TXT
-enrich followers, following, and bio email
+open every expanded profile and click the bio More button when present
+enrich followers, following, expanded bio email, and public business/contact email
 write Excel
 ```
 
@@ -109,7 +110,7 @@ Excel columns:
 handle | followers | following | email
 ```
 
-When a count cannot be read, `followers` or `following` is `未知`. When no email is found in the Instagram bio, `email` is `没有`.
+Email collection combines the expanded bio, public `business_email`/`public_email` profile fields, visible `mailto:` links, and a public Contact dialog when available. Private account-login email is never accessible. When a count cannot be read, `followers` or `following` is `未知`. When no public email is found, `email` is `没有`.
 
 ## Local Data
 

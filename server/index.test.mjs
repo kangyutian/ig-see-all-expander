@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  collectProfileEmails,
   createBottomConfirmationState,
   isOpenConnectorClient,
   startLocalServer,
@@ -41,6 +42,19 @@ test("See all bottom confirmation resets when lazy loading changes height or han
   state = updateBottomConfirmation(state, expandedBottom, 60);
   assert.equal(state.stableBottomRounds, 0);
   assert.equal(state.complete, false);
+});
+
+test("profile email collection combines expanded bio and public contact fields", () => {
+  assert.deepEqual(
+    collectProfileEmails({
+      bio: "Write to studio@example.com for collaborations.",
+      businessEmail: "sales@example.com",
+      publicEmail: "STUDIO@example.com",
+      contactText: "Email\nhello@example.org",
+    }),
+    ["studio@example.com", "sales@example.com", "hello@example.org"]
+  );
+  assert.deepEqual(collectProfileEmails({ bio: "No public contact details" }), []);
 });
 
 test("Excel export contains handle, followers, following, and email", async () => {

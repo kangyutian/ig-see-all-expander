@@ -214,7 +214,13 @@ function App() {
     });
     source.addEventListener("enrich:progress", (event) => {
       const data = JSON.parse(event.data);
-      setEnrichProgress({ current: data.index || 0, total: data.total || 0, handle: data.handle || "" });
+      setEnrichProgress((prev) => ({
+        ...(prev || {}),
+        ...data,
+        current: data.index || 0,
+        total: data.total || 0,
+        handle: data.handle || "",
+      }));
     });
     source.addEventListener("done", (event) => {
       const data = JSON.parse(event.data);
@@ -379,7 +385,7 @@ function App() {
                     ? "Done"
                     : "Waiting"
               }
-              detail="followers - following - bio email"
+              detail={enrichmentDetail(enrichProgress)}
             />
           </div>
 
@@ -493,6 +499,13 @@ function seedStatusLabel(stat) {
   if (stat.atBottom) return `Confirming bottom ${stat.bottomStable || 0}/${stat.bottomRequired || 8}`;
   if (stat.maxTop > 0) return `Scrolling ${Math.round(stat.scrollTop || 0)}/${Math.round(stat.maxTop)} px`;
   return "Opening See all";
+}
+
+function enrichmentDetail(progress) {
+  if (!progress?.handle) return "followers - following - public email";
+  if (!progress.pageChecked) return "Opening profile and checking More";
+  const bioState = progress.bioExpanded ? "More opened" : "Bio already visible";
+  return `${bioState} - ${progress.contactOpened ? "Contact opened" : "public contact checked"}`;
 }
 
 function normalizeHandles(value) {
