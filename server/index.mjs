@@ -1106,13 +1106,23 @@ async function collectSeed({ session, seed, seedSet, job }) {
     await sleep(6500);
     if (job.cancelled) return { seed, handles: [] };
 
-    const similarClicked = await clickSimilarAccounts(cdp);
-    if (!similarClicked) throw new Error("Similar accounts button was not found.");
-    await waitForText(cdp, "Suggested for you", 8000).catch(() => {});
+    let similarResult = await clickSimilarAccounts(cdp);
+    if (!similarResult?.clicked) throw new Error(`Similar accounts button was not found. ${similarResult?.diagnostic || ""}`.trim());
 
-    const seeAllClicked = await clickSeeAll(cdp);
-    if (!seeAllClicked) throw new Error("See all button was not found after opening suggestions.");
-    await waitForDialog(cdp, 10000);
+    let suggestedState = await waitForSuggestedSurface(cdp, 12000);
+    if (!suggestedState.dialogOpen && !suggestedState.hasSeeAll) {
+      // Instagram occasionally ignores the first click while the profile header is still hydrating.
+      similarResult = await clickSimilarAccounts(cdp);
+      if (similarResult?.clicked) suggestedState = await waitForSuggestedSurface(cdp, 8000);
+    }
+
+    if (!suggestedState.dialogOpen) {
+      const seeAllClicked = await clickSeeAll(cdp, 12000);
+      if (!seeAllClicked) {
+        throw new Error(`See all button was not found after opening suggestions. ${formatSuggestedDiagnostic(suggestedState)}`.trim());
+      }
+      await waitForDialog(cdp, 12000);
+    }
 
     const handles = new Map();
     let previousSize = 0;
@@ -1168,47 +1178,149 @@ async function clickSimilarAccounts(cdp) {
   const result = await evaluate(cdp, `(() => {
     window.scrollTo(0, 0);
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
-    const candidates = [...document.querySelectorAll('[role=button], button')]
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const visible = (r) => r.width > 18 && r.height > 18 && r.bottom > 0 && r.top < window.innerHeight;
+    const candidates = [...document.querySelectorAll('[role=button], button, a')]
       .map((el) => {
         const r = el.getBoundingClientRect();
+        const descendantLabels = [...el.querySelectorAll('[aria-label], [title]')]
+          .slice(0, 8)
+          .map((node) => (node.getAttribute('aria-label') || node.getAttribute('title') || ''))
+          .join(' ');
         return {
           el,
-          text: (el.innerText || el.textContent || '').trim(),
-          aria: el.getAttribute('aria-label') || el.getAttribute('title') || '',
+          text: normalize(el.innerText || el.textContent),
+          aria: normalize((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + descendantLabels),
           r
         };
       })
-      .filter((x) => x.r.width > 20 && x.r.height > 20 && x.r.top < 430);
+      .filter((x) => visible(x.r) && x.r.top < Math.min(window.innerHeight * 0.62, 560));
+    const semanticPattern = /similar accounts|discover people|suggested accounts|account suggestions|show account suggestions|recommendations|\\u63a8\\u8350|\\u76f8\\u4f3c|\\u53d1\\u73b0\\u7528\\u6237/i;
+    const excludedPattern = /more options|options|menu|follow|message|share profile|\\u5173\\u6ce8|\\u6d88\\u606f|\\u66f4\\u591a|\\u9009\\u9879|\\u83dc\\u5355/i;
+    const messageButton = candidates.find((x) => /^(message|\\u6d88\\u606f)$|send message|\\u53d1\\u9001\\u6d88\\u606f/i.test(x.text + ' ' + x.aria));
+    const spatialCandidates = messageButton
+      ? candidates
+          .filter((x) => x.r.left >= messageButton.r.right - 6)
+          .filter((x) => Math.abs((x.r.top + x.r.height / 2) - (messageButton.r.top + messageButton.r.height / 2)) < Math.max(34, messageButton.r.height))
+          .filter((x) => x.r.width <= 90 && x.r.height <= 74 && !excludedPattern.test(x.text + ' ' + x.aria))
+          .sort((a, b) => a.r.left - b.r.left)
+      : [];
     const target =
-      candidates.find((x) => /similar accounts|discover people|suggested accounts|\u63a8\u8350|\u76f8\u4f3c/i.test((x.text || '') + ' ' + (x.aria || ''))) ||
+      candidates.find((x) => semanticPattern.test(x.text + ' ' + x.aria)) ||
+      spatialCandidates[0] ||
       candidates
-        .filter((x) => !/follow|message|options|more|\u5173\u6ce8|\u6d88\u606f|\u66f4\u591a/i.test((x.text || '') + ' ' + (x.aria || '')))
-        .filter((x) => x.r.left > viewportWidth * 0.52 && x.r.top > 180 && x.r.width <= 110 && x.r.height <= 70)
+        .filter((x) => !excludedPattern.test(x.text + ' ' + x.aria))
+        .filter((x) => x.r.left > viewportWidth * 0.52 && x.r.width <= 90 && x.r.height <= 74)
         .sort((a, b) => b.r.left - a.r.left)[0];
-    if (!target) return null;
-    return { x: target.r.left + target.r.width / 2, y: target.r.top + target.r.height / 2 };
+    if (!target) {
+      return {
+        clicked: false,
+        diagnostic: 'Visible profile controls: ' + candidates.slice(0, 12).map((x) => normalize(x.text + ' ' + x.aria) || '[icon]').join(' | ')
+      };
+    }
+    return {
+      clicked: true,
+      x: target.r.left + target.r.width / 2,
+      y: target.r.top + target.r.height / 2,
+      label: normalize(target.text + ' ' + target.aria) || '[icon]'
+    };
   })()`);
-  if (!result) return false;
+  if (!result?.clicked) return result || { clicked: false };
   await mouseClick(cdp, result);
-  return true;
+  await sleep(450);
+  return result;
 }
 
-async function clickSeeAll(cdp) {
-  const result = await evaluate(cdp, `(() => {
-    const candidates = [...document.querySelectorAll('a, [role=button], button, div')]
+async function clickSeeAll(cdp, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const result = await evaluate(cdp, `(() => {
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const seeAllPattern = /^(see all|view all|show all|\\u67e5\\u770b\\u5168\\u90e8|\\u67e5\\u770b\\u6240\\u6709|\\u5168\\u90e8\\u67e5\\u770b|ver todo|voir tout|voir tous|ver tudo|mostra tutti|alle ansehen|alle anzeigen|\\ubaa8\\ub450 \\ubcf4\\uae30)$/i;
+      const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+      const all = [...document.querySelectorAll('a, button, [role=button], span, div')];
+      const headings = all.filter((el) => titlePattern.test(normalize(el.innerText || el.textContent)));
+      const scored = all
+        .map((el) => {
+          const text = normalize(el.innerText || el.textContent);
+          const r = el.getBoundingClientRect();
+          const interactive = el.closest('a, button, [role=button]') || el;
+          const ir = interactive.getBoundingClientRect();
+          const nearHeading = headings.some((heading) => {
+            const hr = heading.getBoundingClientRect();
+            return ir.top >= hr.top - 80 && ir.top <= hr.bottom + Math.max(180, window.innerHeight * 0.55);
+          });
+          return { el: interactive, text, r: ir, nearHeading };
+        })
+        .filter((x) => seeAllPattern.test(x.text))
+        .filter((x) => x.r.width > 12 && x.r.height > 8)
+        .sort((a, b) => Number(b.nearHeading) - Number(a.nearHeading) || a.r.top - b.r.top || a.r.width - b.r.width);
+      const target = scored[0];
+      if (!target) return null;
+      if (target.r.bottom <= 0 || target.r.top >= window.innerHeight) {
+        target.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        return { needsScroll: true, label: target.text };
+      }
+      return { x: target.r.left + target.r.width / 2, y: target.r.top + target.r.height / 2, label: target.text };
+    })()`);
+    if (result) {
+      if (result.needsScroll) {
+        await sleep(350);
+        continue;
+      }
+      await mouseClick(cdp, result);
+      return true;
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
+async function waitForSuggestedSurface(cdp, timeoutMs) {
+  const start = Date.now();
+  let latest = { dialogOpen: false, hasHeading: false, hasSeeAll: false, candidates: [] };
+  while (Date.now() - start < timeoutMs) {
+    latest = await inspectSuggestedSurface(cdp).catch(() => latest);
+    if (latest.dialogOpen || latest.hasSeeAll) return latest;
+    await sleep(400);
+  }
+  return latest;
+}
+
+async function inspectSuggestedSurface(cdp) {
+  return evaluate(cdp, `(() => {
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+    const seeAllPattern = /^(see all|view all|show all|\\u67e5\\u770b\\u5168\\u90e8|\\u67e5\\u770b\\u6240\\u6709|\\u5168\\u90e8\\u67e5\\u770b|ver todo|voir tout|voir tous|ver tudo|mostra tutti|alle ansehen|alle anzeigen|\\ubaa8\\ub450 \\ubcf4\\uae30)$/i;
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+    const dialogOpen = dialogs.some((el) => titlePattern.test(normalize(el.innerText || el.textContent)));
+    const visible = [...document.querySelectorAll('a, button, [role=button], h1, h2, h3, span, div')]
       .map((el) => {
         const r = el.getBoundingClientRect();
-        return { el, text: (el.innerText || el.textContent || '').trim(), r };
+        return {
+          text: normalize(el.innerText || el.textContent),
+          aria: normalize((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '')),
+          r
+        };
       })
-      .filter((x) => x.text === 'See all' && x.r.width > 20 && x.r.height > 10)
-      .sort((a, b) => a.r.top - b.r.top);
-    const target = candidates[0];
-    if (!target) return null;
-    return { x: target.r.left + target.r.width / 2, y: target.r.top + target.r.height / 2 };
+      .filter((x) => x.r.width > 10 && x.r.height > 8 && x.r.bottom > 0 && x.r.top < window.innerHeight);
+    const hasHeading = visible.some((x) => titlePattern.test(x.text + ' ' + x.aria));
+    const hasSeeAll = visible.some((x) => seeAllPattern.test(x.text));
+    const interesting = visible
+      .filter((x) => /suggest|recommend|similar|see all|view all|show all|\\u63a8\\u8350|\\u76f8\\u4f3c|\\u67e5\\u770b\\u5168\\u90e8/i.test(x.text + ' ' + x.aria))
+      .map((x) => normalize(x.text + ' ' + x.aria))
+      .filter(Boolean)
+      .filter((value, index, array) => array.indexOf(value) === index)
+      .slice(0, 10);
+    return { dialogOpen, hasHeading, hasSeeAll, candidates: interesting };
   })()`);
-  if (!result) return false;
-  await mouseClick(cdp, result);
-  return true;
+}
+
+function formatSuggestedDiagnostic(state) {
+  if (!state) return "No Suggested for you surface was detected.";
+  const flags = `heading=${Boolean(state.hasHeading)}, seeAll=${Boolean(state.hasSeeAll)}, dialog=${Boolean(state.dialogOpen)}`;
+  const candidates = Array.isArray(state.candidates) && state.candidates.length ? `; visible candidates: ${state.candidates.join(" | ")}` : "";
+  return `Page state: ${flags}${candidates}`;
 }
 
 async function extractSuggestedModal(cdp, seed, seedSet) {
@@ -1218,8 +1330,9 @@ async function extractSuggestedModal(cdp, seed, seedSet) {
       const pageHandle = ${JSON.stringify(seed)};
       const seedSet = new Set(${JSON.stringify([...seedSet])});
       const reserved = new Set(${JSON.stringify([...reservedHandles])});
+      const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
       const dialog = [...document.querySelectorAll('[role="dialog"]')]
-        .find((el) => (el.innerText || '').includes('Suggested for you'));
+        .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
       if (!dialog) return [];
       const scrollBox = [...dialog.querySelectorAll('div')]
         .filter((el) => el.scrollHeight > el.clientHeight + 20)
@@ -1244,8 +1357,9 @@ async function extractSuggestedModal(cdp, seed, seedSet) {
 
 async function scrollSuggestedModal(cdp) {
   const beforeState = await evaluate(cdp, `(() => {
+    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
-      .find((el) => (el.innerText || '').includes('Suggested for you'));
+      .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
     if (!dialog) return { changed: false, atBottom: true, scrollTop: -1, scrollHeight: 0, clientHeight: 0, rect: null };
     const scrollBox = [...dialog.querySelectorAll('div')]
       .filter((el) => el.scrollHeight > el.clientHeight + 20)
@@ -1275,8 +1389,9 @@ async function scrollSuggestedModal(cdp) {
     .catch(() => {});
   await sleep(120);
   const afterState = await evaluate(cdp, `(() => {
+    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
-      .find((el) => (el.innerText || '').includes('Suggested for you'));
+      .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
     if (!dialog) return { changed: false, atBottom: true, scrollTop: -1, scrollHeight: 0, clientHeight: 0 };
     const scrollBox = [...dialog.querySelectorAll('div')]
       .filter((el) => el.scrollHeight > el.clientHeight + 20)
@@ -1297,8 +1412,9 @@ async function scrollSuggestedModal(cdp) {
 
 async function closeDialog(cdp) {
   await evaluate(cdp, `(() => {
+    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
-      .find((el) => (el.innerText || '').includes('Suggested for you'));
+      .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
     if (!dialog) return false;
     const close = [...dialog.querySelectorAll('[role=button], button')]
       .map((el) => ({ el, text: (el.innerText || el.textContent || '').trim(), aria: el.getAttribute('aria-label') || '', r: el.getBoundingClientRect() }))
@@ -1324,7 +1440,10 @@ async function waitForDialog(cdp, timeoutMs) {
   while (Date.now() - start < timeoutMs) {
     const found = await evaluate(
       cdp,
-      `(() => [...document.querySelectorAll('[role="dialog"]')].some((el) => (el.innerText || '').includes('Suggested for you')))()`
+      `(() => {
+        const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+        return [...document.querySelectorAll('[role="dialog"]')].some((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
+      })()`
     ).catch(() => false);
     if (found) return true;
     await sleep(400);
