@@ -1,7 +1,7 @@
 {
   "name": "ig-see-all-expander",
   "productName": "IG See All Expander",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Windows desktop tool for full Instagram Suggested for you handle capture and profile enrichment.",
   "author": "kangyutian",
   "private": true,
@@ -65,7 +65,7 @@
       "oneClick": false,
       "perMachine": false,
       "allowElevation": false,
-      "allowToChangeInstallationDirectory": false,
+      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "IG See All Expander"
