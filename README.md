@@ -5,7 +5,7 @@ Windows desktop tool for expanding Instagram creator handles from the `Suggested
 It connects to a logged-in local browser session, opens each seed profile, clicks `Similar accounts`, opens the `Suggested for you` `See all` dialog, scrolls the dialog list to the bottom, deduplicates handles, then exports:
 
 - TXT: handle list only, one handle per line.
-- Excel: `handle`, `followers`, `email`.
+- Excel: `handle`, `followers`, `following`, `email`.
 
 ## Download
 
@@ -75,12 +75,13 @@ click Similar accounts
 click Suggested for you -> See all
 confirm the Suggested for you dialog is open
 scroll only the dialog's internal list
-continue until scroll position and new handles stop changing
+keep nudging the list at the bottom to trigger delayed loading
+require handle count, list height, and bottom position to stay unchanged for 8 checks
 extract profile links from the dialog
 exclude seed handles and Instagram reserved paths
 deduplicate globally
 write TXT
-enrich followers and bio email
+enrich followers, following, and bio email
 write Excel
 ```
 
@@ -105,10 +106,10 @@ handle_three
 Excel columns:
 
 ```text
-handle | followers | email
+handle | followers | following | email
 ```
 
-When followers cannot be read, `followers` is `未知`. When no email is found in the Instagram bio, `email` is `没有`.
+When a count cannot be read, `followers` or `following` is `未知`. When no email is found in the Instagram bio, `email` is `没有`.
 
 ## Local Data
 

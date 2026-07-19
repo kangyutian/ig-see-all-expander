@@ -351,11 +351,12 @@ button:disabled {
   background: #f8fafc;
   border: 1px solid #e2e7ef;
   border-radius: 8px;
-  padding: 11px 12px;
+  min-height: 96px;
+  padding: 12px;
 }
 
-.phaseCard span,
-.phaseCard strong {
+.phaseCard strong,
+.phaseCard small {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -363,15 +364,39 @@ button:disabled {
   white-space: nowrap;
 }
 
-.phaseCard span {
+.phaseTitle {
+  align-items: center;
   color: #697586;
+  display: flex;
   font-size: 12px;
+  gap: 6px;
+}
+
+.phaseTitle svg {
+  color: #365fe8;
+  flex: 0 0 auto;
 }
 
 .phaseCard strong {
   color: #1f2937;
   font-size: 13px;
+  margin-top: 8px;
+}
+
+.phaseCard small {
+  color: #697586;
+  font-size: 10px;
   margin-top: 5px;
+}
+
+.phaseCard.success {
+  background: #f2fbf6;
+  border-color: #b7e3c9;
+}
+
+.phaseCard.success .phaseTitle svg,
+.phaseCard.success strong {
+  color: #067647;
 }
 
 .seedList {
@@ -384,25 +409,45 @@ button:disabled {
 .seedRow {
   align-items: center;
   border-bottom: 1px solid #edf0f5;
-  display: flex;
+  display: grid;
   gap: 10px;
-  justify-content: space-between;
-  padding: 10px 11px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 11px;
 }
 
 .seedRow:last-child {
   border-bottom: 0;
 }
 
-.seedRow span {
+.seedIdentity {
+  min-width: 0;
+}
+
+.seedIdentity span,
+.seedIdentity small {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.seedIdentity span {
+  color: #202939;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.seedIdentity small {
+  color: #697586;
+  font-size: 10px;
+  margin-top: 3px;
+}
+
 .seedRow strong {
   color: #365fe8;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .seedRow.done strong {
@@ -411,6 +456,28 @@ button:disabled {
 
 .seedRow.error strong {
   color: #b42318;
+}
+
+.seedRow.cancelled strong,
+.seedRow.cancelled .seedIdentity small {
+  color: #b54708;
+}
+
+.scrollTrack {
+  background: #e7ebf2;
+  border-radius: 999px;
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.scrollTrack span {
+  background: #365fe8;
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+  transition: width 220ms ease;
 }
 
 .logHeader {

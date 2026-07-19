@@ -13,6 +13,7 @@ import {
   ScrollText,
   Square,
   TerminalSquare,
+  UsersRound,
 } from "lucide-react";
 import "./styles.css";
 
@@ -50,6 +51,7 @@ function App() {
   const normalizedPreview = useMemo(() => normalizeHandles(handlesText), [handlesText]);
   const selectedBrowser = browsers.find((browser) => browser.sessionId === selectedSessionId);
   const activeSessionLabel = manualCdpUrl.trim() || selectedBrowser?.currentUrl || selectedBrowser?.cdpUrl || "Not selected";
+  const activeCapture = Object.entries(seedStats).find(([, stat]) => stat.status === "running");
 
   useEffect(() => {
     loadSystemInfo();
@@ -179,12 +181,26 @@ function App() {
     });
     source.addEventListener("seed:progress", (event) => {
       const data = JSON.parse(event.data);
-      setSeedStats((prev) => ({ ...prev, [data.seed]: { status: "running", count: data.count } }));
+      setSeedStats((prev) => ({
+        ...prev,
+        [data.seed]: { ...(prev[data.seed] || {}), ...data, status: "running" },
+      }));
     });
     source.addEventListener("seed:done", (event) => {
       const data = JSON.parse(event.data);
-      setSeedStats((prev) => ({ ...prev, [data.seed]: { status: "done", count: data.count } }));
-      addLog(`@${data.seed}: ${data.count} handle(s).`, "success");
+      setSeedStats((prev) => ({
+        ...prev,
+        [data.seed]: { ...(prev[data.seed] || {}), status: "done", count: data.count, bottomConfirmed: true },
+      }));
+      addLog(`@${data.seed}: ${data.count} handle(s), full bottom confirmed.`, "success");
+    });
+    source.addEventListener("seed:cancelled", (event) => {
+      const data = JSON.parse(event.data);
+      setSeedStats((prev) => ({
+        ...prev,
+        [data.seed]: { ...(prev[data.seed] || {}), status: "cancelled", count: data.count, bottomConfirmed: false },
+      }));
+      addLog(`@${data.seed}: stopped before full-bottom confirmation.`, "warn");
     });
     source.addEventListener("seed:error", (event) => {
       const data = JSON.parse(event.data);
@@ -224,7 +240,7 @@ function App() {
       <section className="toolbar">
         <div>
           <h1>IG See All Expander</h1>
-          <p>Live browser scan - See all capture - Excel enrichment</p>
+          <p>Live browser scan - full-bottom capture - profile enrichment</p>
         </div>
         <div className="toolbarActions">
           {systemInfo && <span className="versionBadge">v{systemInfo.version} - {systemInfo.mode}</span>}
@@ -348,7 +364,12 @@ function App() {
           </div>
 
           <div className="phaseGrid">
-            <PhaseCard title="See all capture" value={captureSummary(seedStats, running, complete)} />
+            <PhaseCard
+              title="See all capture"
+              value={captureSummary(seedStats, running, complete)}
+              detail={captureDetail(activeCapture, complete)}
+              tone={complete && Object.values(seedStats).every((stat) => stat.status === "done") ? "success" : "default"}
+            />
             <PhaseCard
               title="Profile enrichment"
               value={
@@ -358,6 +379,7 @@ function App() {
                     ? "Done"
                     : "Waiting"
               }
+              detail="followers - following - bio email"
             />
           </div>
 
@@ -382,8 +404,16 @@ function App() {
             {Object.keys(seedStats).length ? (
               Object.entries(seedStats).map(([seed, stat]) => (
                 <div className={`seedRow ${stat.status}`} key={seed}>
-                  <span>@{seed}</span>
-                  <strong>{stat.status === "error" ? "Failed" : stat.count}</strong>
+                  <div className="seedIdentity">
+                    <span>@{seed}</span>
+                    <small>{seedStatusLabel(stat)}</small>
+                  </div>
+                  <strong>{stat.status === "error" ? "Failed" : `${stat.count || 0} handles`}</strong>
+                  {stat.status === "running" && stat.maxTop > 0 && (
+                    <div className="scrollTrack" aria-label={`Scroll progress for ${seed}`}>
+                      <span style={{ width: `${Math.min(100, Math.max(2, (stat.scrollTop / stat.maxTop) * 100))}%` }} />
+                    </div>
+                  )}
                 </div>
               ))
             ) : (
@@ -423,11 +453,15 @@ function Metric({ icon, label, value }) {
   );
 }
 
-function PhaseCard({ title, value }) {
+function PhaseCard({ title, value, detail, tone = "default" }) {
   return (
-    <div className="phaseCard">
-      <span>{title}</span>
+    <div className={`phaseCard ${tone}`}>
+      <div className="phaseTitle">
+        {title === "Profile enrichment" ? <UsersRound size={16} /> : <CheckCircle2 size={16} />}
+        <span>{title}</span>
+      </div>
       <strong>{value}</strong>
+      {detail && <small>{detail}</small>}
     </div>
   );
 }
@@ -437,7 +471,28 @@ function captureSummary(seedStats, running, complete) {
   if (!values.length) return running ? "Starting" : complete ? "Done" : "Waiting";
   const done = values.filter((item) => item.status === "done").length;
   const total = values.length;
-  return `${done}/${total} seeds`;
+  if (complete && values.some((item) => item.status === "cancelled")) return `${done}/${total} confirmed - stopped`;
+  if (complete && values.some((item) => item.status === "error")) return `${done}/${total} confirmed - check failures`;
+  return `${done}/${total} seeds confirmed`;
+}
+
+function captureDetail(activeCapture, complete) {
+  if (activeCapture) {
+    const [, stat] = activeCapture;
+    const position = stat.maxTop > 0 ? `${Math.round(stat.scrollTop || 0)}/${Math.round(stat.maxTop)} px` : "Locating list";
+    if (stat.atBottom) return `${position} - bottom check ${stat.bottomStable || 0}/${stat.bottomRequired || 8}`;
+    return `${position} - scrolling inside dialog`;
+  }
+  return complete ? "Each completed seed passed the stable-bottom check" : "Requires 8 stable checks at the dialog bottom";
+}
+
+function seedStatusLabel(stat) {
+  if (stat.status === "done") return "Bottom confirmed";
+  if (stat.status === "cancelled") return "Stopped before bottom";
+  if (stat.status === "error") return stat.error || "Capture failed";
+  if (stat.atBottom) return `Confirming bottom ${stat.bottomStable || 0}/${stat.bottomRequired || 8}`;
+  if (stat.maxTop > 0) return `Scrolling ${Math.round(stat.scrollTop || 0)}/${Math.round(stat.maxTop)} px`;
+  return "Opening See all";
 }
 
 function normalizeHandles(value) {

@@ -57,6 +57,9 @@ const reservedHandles = new Set([
   "web",
 ]);
 
+const BOTTOM_CONFIRMATION_ROUNDS = 8;
+const NON_BOTTOM_STALL_LIMIT = 18;
+
 async function handleRequest(req, res) {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || `${host}:${port}`}`);
@@ -990,7 +993,11 @@ async function runJob(job) {
       const result = await collectSeed({ session: job.session, seed, seedSet, job });
       job.bySeed.push(result);
       for (const handle of result.handles) allRows.push({ source: seed, handle });
-      emit(job, "seed:done", { seed, count: result.handles.length });
+      if (result.cancelled) {
+        emit(job, "seed:cancelled", { seed, count: result.handles.length });
+        break;
+      }
+      emit(job, "seed:done", { seed, count: result.handles.length, bottomConfirmed: true });
     } catch (error) {
       const message = String(error?.message || error);
       job.bySeed.push({ seed, error: message, handles: [] });
@@ -1022,7 +1029,9 @@ async function runJob(job) {
 }
 
 async function enrichHandles({ session, handles, job }) {
-  if (!handles.length || job.cancelled) return handles.map((handle) => ({ handle, followers: "\u672a\u77e5", email: "\u6ca1\u6709" }));
+  if (!handles.length || job.cancelled) {
+    return handles.map((handle) => ({ handle, followers: "\u672a\u77e5", following: "\u672a\u77e5", email: "\u6ca1\u6709" }));
+  }
   const page = await createBrowserPage(session);
   const rows = [];
   try {
@@ -1035,19 +1044,28 @@ async function enrichHandles({ session, handles, job }) {
         const info = await getProfileInfoByApi(page, handle);
         rows.push({
           handle,
-          followers: formatFollowers(info.followers),
+          followers: formatCount(info.followers),
+          following: formatCount(info.following),
           email: extractEmails(info.bio).join("; ") || "\u6ca1\u6709",
         });
       } catch (error) {
         emit(job, "log", { level: "warn", message: `Profile fallback for @${handle}: ${String(error?.message || error)}` });
-        const fallback = await getProfileInfoByPage(page, handle).catch(() => ({ followers: null, bio: "" }));
+        const fallback = await getProfileInfoByPage(page, handle).catch(() => ({ followers: null, following: null, bio: "" }));
         rows.push({
           handle,
-          followers: formatFollowers(fallback.followers),
+          followers: formatCount(fallback.followers),
+          following: formatCount(fallback.following),
           email: extractEmails(fallback.bio).join("; ") || "\u6ca1\u6709",
         });
       }
       await sleep(450);
+    }
+    if (rows.length < handles.length) {
+      const completedHandles = new Set(rows.map((row) => row.handle));
+      for (const handle of handles) {
+        if (completedHandles.has(handle)) continue;
+        rows.push({ handle, followers: "\u672a\u77e5", following: "\u672a\u77e5", email: "\u6ca1\u6709" });
+      }
     }
   } finally {
     page.close();
@@ -1105,6 +1123,7 @@ async function getProfileInfoByApi(cdp, handle) {
       if (!user) throw new Error('No user in profile response');
       return {
         followers: user.edge_followed_by?.count ?? null,
+        following: user.edge_follow?.count ?? null,
         bio: user.biography || ''
       };
     })()`
@@ -1118,16 +1137,26 @@ async function getProfileInfoByPage(cdp, handle) {
     cdp,
     `(() => {
       const text = document.body?.innerText || '';
-      const followersMatch = text.match(/([\\d,.]+\\s*[KMB万萬]?)\\s+followers/i);
+      const metadata = document.querySelector('meta[property="og:description"]')?.content || '';
+      const source = metadata + '\n' + text;
+      const readCount = (hrefPart, labelPattern) => {
+        const link = [...document.querySelectorAll('a[href]')]
+          .find((node) => (node.getAttribute('href') || '').includes(hrefPart));
+        const linkMatch = (link?.innerText || link?.textContent || '').match(/([\\d,.]+\\s*[KMB\\u4e07\\u842c]?)/i);
+        if (linkMatch) return linkMatch[1];
+        const match = source.match(new RegExp('([\\\\d,.]+\\\\s*[KMB\\u4e07\\u842c]?)\\\\s*(?:' + labelPattern + ')', 'i'));
+        return match ? match[1] : null;
+      };
       return {
-        followers: followersMatch ? followersMatch[1] : null,
+        followers: readCount('/followers/', 'followers|\\u7c89\\u4e1d|\\u7c89\\u7d72'),
+        following: readCount('/following/', 'following|\\u5173\\u6ce8|\\u95dc\\u6ce8|\\u8ffd\\u8e64\\u4e2d|\\u8ffd\\u8e2a'),
         bio: text.slice(0, 1800)
       };
     })()`
   );
 }
 
-async function writeExcel(filePath, rows) {
+export async function writeExcel(filePath, rows) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "IG See All Expander";
   workbook.created = new Date();
@@ -1135,14 +1164,16 @@ async function writeExcel(filePath, rows) {
   sheet.columns = [
     { header: "handle", key: "handle", width: 34 },
     { header: "followers", key: "followers", width: 14 },
+    { header: "following", key: "following", width: 14 },
     { header: "email", key: "email", width: 42 },
   ];
-  sheet.getRow(1).font = { bold: true };
+  sheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  sheet.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF172033" } };
   sheet.getRow(1).alignment = { vertical: "middle" };
   sheet.getRow(1).height = 22;
   for (const row of rows) sheet.addRow(row);
   sheet.views = [{ state: "frozen", ySplit: 1 }];
-  sheet.autoFilter = "A1:C1";
+  sheet.autoFilter = "A1:D1";
   await workbook.xlsx.writeFile(filePath);
 }
 
@@ -1175,39 +1206,64 @@ async function collectSeed({ session, seed, seedSet, job }) {
     }
 
     const handles = new Map();
-    let previousSize = 0;
-    let staleRounds = 0;
-    let lastScrollTop = -1;
+    let confirmation = createBottomConfirmationState();
     let finalScrollState = null;
+    let bottomConfirmed = false;
 
-    for (let round = 0; round < 120; round += 1) {
+    for (let round = 0; round < 240; round += 1) {
       if (job.cancelled) break;
       const items = await extractSuggestedModal(cdp, seed, seedSet);
       for (const handle of items) handles.set(handle, handle);
-      emit(job, "seed:progress", { seed, count: handles.size });
-
-      staleRounds = handles.size === previousSize ? staleRounds + 1 : 0;
-      previousSize = handles.size;
 
       const scrollState = await scrollSuggestedModal(cdp);
+      if (!scrollState?.dialogFound) throw new Error("Suggested for you dialog closed before the full list was captured.");
       finalScrollState = scrollState;
-      if (scrollState.atBottom && staleRounds >= 2) break;
-      if (!scrollState.changed && scrollState.scrollTop === lastScrollTop && staleRounds >= 4) break;
-      if (scrollState.atBottom && staleRounds >= 8) break;
-      lastScrollTop = scrollState.scrollTop;
-      await sleep(850);
+      confirmation = updateBottomConfirmation(confirmation, scrollState, handles.size);
+      const maxTop = Math.max(0, scrollState.scrollHeight - scrollState.clientHeight);
+      emit(job, "seed:progress", {
+        seed,
+        count: handles.size,
+        scrollTop: Math.max(0, scrollState.scrollTop),
+        maxTop,
+        atBottom: scrollState.atBottom,
+        bottomStable: confirmation.stableBottomRounds,
+        bottomRequired: BOTTOM_CONFIRMATION_ROUNDS,
+      });
+
+      if (confirmation.complete) {
+        bottomConfirmed = true;
+        break;
+      }
+      if (confirmation.nonBottomStallRounds >= NON_BOTTOM_STALL_LIMIT) {
+        throw new Error(`See all list could not reach the bottom (${Math.max(0, scrollState.scrollTop)}/${maxTop}). No partial result was accepted.`);
+      }
+      await sleep(scrollState.atBottom ? 1150 : 720);
+    }
+
+    if (job.cancelled) {
+      emit(job, "log", {
+        level: "warn",
+        message: `@${seed} stopped by user before bottom confirmation with ${handles.size} handle(s).`,
+      });
+      await closeDialog(cdp).catch(() => {});
+      return { seed, handles: [...handles.keys()], cancelled: true, bottomConfirmed: false };
+    }
+
+    if (!bottomConfirmed) {
+      const maxTop = Math.max(0, (finalScrollState?.scrollHeight || 0) - (finalScrollState?.clientHeight || 0));
+      throw new Error(`See all list did not pass full-bottom confirmation (${Math.max(0, finalScrollState?.scrollTop || 0)}/${maxTop}). No partial result was accepted.`);
     }
 
     if (finalScrollState) {
       const maxTop = Math.max(0, (finalScrollState.scrollHeight || 0) - (finalScrollState.clientHeight || 0));
       emit(job, "log", {
-        level: finalScrollState.atBottom ? "success" : "warn",
-        message: `@${seed} See all scroll ${finalScrollState.atBottom ? "bottom reached" : "stopped before confirmed bottom"} (${finalScrollState.scrollTop}/${maxTop}).`,
+        level: "success",
+        message: `@${seed} See all bottom fully confirmed (${finalScrollState.scrollTop}/${maxTop}) after ${confirmation.stableBottomRounds} stable checks.`,
       });
     }
 
     await closeDialog(cdp).catch(() => {});
-    return { seed, handles: [...handles.keys()] };
+    return { seed, handles: [...handles.keys()], cancelled: false, bottomConfirmed: true };
   } finally {
     cdp.close();
   }
@@ -1410,7 +1466,7 @@ async function scrollSuggestedModal(cdp) {
     const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
       .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
-    if (!dialog) return { changed: false, atBottom: true, scrollTop: -1, scrollHeight: 0, clientHeight: 0, rect: null };
+    if (!dialog) return { dialogFound: false, changed: false, atBottom: false, scrollTop: -1, scrollHeight: 0, clientHeight: 0, rect: null };
     const scrollBox = [...dialog.querySelectorAll('div')]
       .filter((el) => el.scrollHeight > el.clientHeight + 20)
       .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0] || dialog;
@@ -1419,6 +1475,7 @@ async function scrollSuggestedModal(cdp) {
     scrollBox.scrollTop = Math.min(scrollBox.scrollTop + Math.max(180, Math.floor(scrollBox.clientHeight * 0.72)), scrollBox.scrollHeight);
     scrollBox.dispatchEvent(new Event('scroll', { bubbles: true }));
     return {
+      dialogFound: true,
       changed: scrollBox.scrollTop !== before,
       scrollTop: scrollBox.scrollTop,
       scrollHeight: scrollBox.scrollHeight,
@@ -1427,14 +1484,14 @@ async function scrollSuggestedModal(cdp) {
       rect: { x: rect.left + rect.width / 2, y: rect.top + Math.min(rect.height - 12, Math.max(12, rect.height * 0.78)) }
     };
   })()`);
-  if (!beforeState?.rect || beforeState.atBottom) return beforeState;
+  if (!beforeState?.rect) return beforeState;
   await cdp
     .send("Input.dispatchMouseEvent", {
       type: "mouseWheel",
       x: beforeState.rect.x,
       y: beforeState.rect.y,
       deltaX: 0,
-      deltaY: Math.max(260, Math.floor((beforeState.clientHeight || 400) * 0.85)),
+      deltaY: Math.max(320, Math.floor((beforeState.clientHeight || 400) * 0.95)),
     })
     .catch(() => {});
   await sleep(120);
@@ -1442,11 +1499,12 @@ async function scrollSuggestedModal(cdp) {
     const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
       .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
-    if (!dialog) return { changed: false, atBottom: true, scrollTop: -1, scrollHeight: 0, clientHeight: 0 };
+    if (!dialog) return { dialogFound: false, changed: false, atBottom: false, scrollTop: -1, scrollHeight: 0, clientHeight: 0 };
     const scrollBox = [...dialog.querySelectorAll('div')]
       .filter((el) => el.scrollHeight > el.clientHeight + 20)
       .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0] || dialog;
     return {
+      dialogFound: true,
       changed: scrollBox.scrollTop !== ${JSON.stringify(beforeState.scrollTop)},
       scrollTop: scrollBox.scrollTop,
       scrollHeight: scrollBox.scrollHeight,
@@ -1782,12 +1840,52 @@ function extractEmails(text) {
   return [...new Set(matches.map((email) => email.toLowerCase().replace(/[.,;:)]$/, "")))];
 }
 
-function formatFollowers(value) {
+function formatCount(value) {
   if (value === null || value === undefined || value === "") return "\u672a\u77e5";
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const text = String(value).trim();
   if (!text) return "\u672a\u77e5";
   return text;
+}
+
+export function createBottomConfirmationState() {
+  return {
+    previousCount: null,
+    previousScrollTop: null,
+    previousScrollHeight: null,
+    previousMaxTop: null,
+    stableBottomRounds: 0,
+    nonBottomStallRounds: 0,
+    complete: false,
+  };
+}
+
+export function updateBottomConfirmation(previous, scrollState, handleCount) {
+  const current = previous || createBottomConfirmationState();
+  const scrollTop = Number(scrollState?.scrollTop || 0);
+  const scrollHeight = Number(scrollState?.scrollHeight || 0);
+  const clientHeight = Number(scrollState?.clientHeight || 0);
+  const maxTop = Math.max(0, scrollHeight - clientHeight);
+  const metricsStable =
+    current.previousCount === handleCount &&
+    current.previousScrollHeight === scrollHeight &&
+    current.previousMaxTop === maxTop;
+  const stayedAtBottom = Boolean(scrollState?.atBottom) && metricsStable;
+  const samePosition = current.previousScrollTop === scrollTop;
+  const stableBottomRounds = stayedAtBottom ? current.stableBottomRounds + 1 : 0;
+  const nonBottomStallRounds = !scrollState?.atBottom && !scrollState?.changed && samePosition
+    ? current.nonBottomStallRounds + 1
+    : 0;
+
+  return {
+    previousCount: handleCount,
+    previousScrollTop: scrollTop,
+    previousScrollHeight: scrollHeight,
+    previousMaxTop: maxTop,
+    stableBottomRounds,
+    nonBottomStallRounds,
+    complete: stableBottomRounds >= BOTTOM_CONFIRMATION_ROUNDS,
+  };
 }
 
 function timestampForFile() {
