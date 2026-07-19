@@ -343,8 +343,13 @@ function sendConnectorCommand(client, command, payload = {}, timeoutMs = 30000) 
 }
 
 function liveConnectorClients() {
-  const now = Date.now();
-  return [...connectorClients.values()].filter((client) => client.ws.readyState === 1 && now - client.lastSeen < 15000);
+  // An open WebSocket is still a usable connector even when Chrome has not emitted
+  // a tab event recently. Discovery sends a status command and drops dead clients.
+  return [...connectorClients.values()].filter(isOpenConnectorClient);
+}
+
+export function isOpenConnectorClient(client) {
+  return client?.ws?.readyState === 1;
 }
 
 function getConnectorInfo() {
@@ -371,6 +376,13 @@ function writeConnectorExtension(targetDir, secret) {
         permissions: ["tabs", "cookies", "debugger"],
         host_permissions: ["https://www.instagram.com/*", "http://127.0.0.1/*", "ws://127.0.0.1/*"],
         background: { service_worker: "background.js" },
+        content_scripts: [
+          {
+            matches: ["https://www.instagram.com/*"],
+            js: ["content.js"],
+            run_at: "document_idle",
+          },
+        ],
         action: { default_title: "IG See All Expander Connector" },
       },
       null,
@@ -384,6 +396,7 @@ function writeConnectorExtension(targetDir, secret) {
     "utf8"
   );
   fs.writeFileSync(path.join(targetDir, "background.js"), connectorBackgroundJs(), "utf8");
+  fs.writeFileSync(path.join(targetDir, "content.js"), connectorContentJs(), "utf8");
   fs.writeFileSync(
     path.join(targetDir, "README.txt"),
     [
@@ -408,14 +421,20 @@ const config = self.IG_SEE_ALL_CONNECTOR_CONFIG || { ports: [], secret: "" };
 let socket = null;
 let activePortIndex = 0;
 let reconnectTimer = null;
+let heartbeatTimer = null;
 
 connect();
 chrome.tabs.onUpdated.addListener(queueHeartbeat);
 chrome.tabs.onRemoved.addListener(queueHeartbeat);
 chrome.tabs.onActivated.addListener(queueHeartbeat);
+chrome.runtime.onStartup.addListener(connect);
+chrome.runtime.onMessage.addListener((message) => {
+  if (message && message.type === "ig-see-all-wake") ensureConnected();
+});
 
 function connect() {
   clearTimeout(reconnectTimer);
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
   if (!config.secret || !Array.isArray(config.ports) || !config.ports.length) return;
   const port = config.ports[activePortIndex % config.ports.length];
   activePortIndex += 1;
@@ -425,9 +444,16 @@ function connect() {
     reconnectSoon();
     return;
   }
-  socket.addEventListener("open", () => sendHello("hello"));
+  socket.addEventListener("open", () => {
+    startHeartbeat();
+    sendHello("hello");
+  });
   socket.addEventListener("message", handleMessage);
-  socket.addEventListener("close", reconnectSoon);
+  socket.addEventListener("close", () => {
+    stopHeartbeat();
+    socket = null;
+    reconnectSoon();
+  });
   socket.addEventListener("error", () => {
     try { socket.close(); } catch {}
   });
@@ -439,7 +465,22 @@ function reconnectSoon() {
 }
 
 function queueHeartbeat() {
+  ensureConnected();
   setTimeout(() => sendHello("heartbeat"), 250);
+}
+
+function ensureConnected() {
+  if (!socket || (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING)) connect();
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => sendHello("heartbeat"), 5000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
 }
 
 async function sendHello(type = "heartbeat") {
@@ -568,6 +609,15 @@ function waitForTabComplete(tabId, timeoutMs) {
     }
   });
 }
+`;
+}
+
+function connectorContentJs() {
+  return String.raw`(() => {
+  const wake = () => chrome.runtime.sendMessage({ type: "ig-see-all-wake" }).catch(() => {});
+  wake();
+  setInterval(wake, 5000);
+})();
 `;
 }
 

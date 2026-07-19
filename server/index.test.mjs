@@ -3,7 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { startLocalServer } from "./index.mjs";
+import { isOpenConnectorClient, startLocalServer } from "./index.mjs";
+
+test("an open Chrome Connector does not expire only because its last heartbeat is old", () => {
+  assert.equal(isOpenConnectorClient({ ws: { readyState: 1 }, lastSeen: Date.now() - 120_000 }), true);
+  assert.equal(isOpenConnectorClient({ ws: { readyState: 3 }, lastSeen: Date.now() }), false);
+});
 
 test("local server protects APIs and exposes desktop system paths", async (context) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ig-see-all-test-"));
@@ -41,6 +46,13 @@ test("local server protects APIs and exposes desktop system paths", async (conte
   assert.equal(info.outputDir, path.join(dataDir, "outputs"));
   assert.equal(info.connectorExtensionDir, path.join(dataDir, "chrome-connector"));
   assert.ok(fs.existsSync(path.join(info.connectorExtensionDir, "manifest.json")));
+  assert.ok(fs.existsSync(path.join(info.connectorExtensionDir, "content.js")));
+  const connectorManifest = JSON.parse(fs.readFileSync(path.join(info.connectorExtensionDir, "manifest.json"), "utf8"));
+  assert.deepEqual(connectorManifest.content_scripts?.[0]?.matches, ["https://www.instagram.com/*"]);
+  const connectorBackground = fs.readFileSync(path.join(info.connectorExtensionDir, "background.js"), "utf8");
+  assert.match(connectorBackground, /setInterval\(\(\) => sendHello\("heartbeat"\), 5000\)/);
+  const connectorContent = fs.readFileSync(path.join(info.connectorExtensionDir, "content.js"), "utf8");
+  assert.match(connectorContent, /ig-see-all-wake/);
 
   const connectorInfo = await fetch(`${service.url}/api/browser/connector-info`, {
     headers: { "X-App-Token": "test-token" },

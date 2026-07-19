@@ -32,7 +32,7 @@ try {
     path.join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe"),
   ];
   const chromeExe = chromeCandidates.find((candidate) => candidate && fs.existsSync(candidate));
-  if (chromeExe) execFile(chromeExe, [`https://www.instagram.com/${seed}/`], () => {});
+  if (chromeExe) execFile(chromeExe, [`https://www.instagram.com/${seed}/?ig_see_all_smoke=${Date.now()}`], () => {});
 
   let sessions = [];
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -43,8 +43,17 @@ try {
     if (sessions.some((item) => item.source === "chrome-connector")) break;
   }
 
-  const session = sessions.find((item) => item.source === "chrome-connector" && item.loginLikely);
+  let session = sessions.find((item) => item.source === "chrome-connector" && item.loginLikely);
   if (!session) throw new Error("No logged-in Chrome Connector session was discovered.");
+
+  console.log("[scan] First Chrome Connector discovery succeeded. Waiting past the old 15-second expiry...");
+  await new Promise((resolve) => setTimeout(resolve, 17000));
+  const secondScanResponse = await fetch(`${service.url}/api/browser/discover`, { headers });
+  const secondScanData = await secondScanResponse.json();
+  const secondScanSessions = Array.isArray(secondScanData.browsers) ? secondScanData.browsers : [];
+  session = secondScanSessions.find((item) => item.source === "chrome-connector" && item.loginLikely);
+  if (!session) throw new Error("Chrome Connector disappeared on the second discovery after 17 seconds.");
+  console.log("[scan] Second Chrome Connector discovery succeeded.");
 
   const expandResponse = await fetch(`${service.url}/api/expand`, {
     method: "POST",
