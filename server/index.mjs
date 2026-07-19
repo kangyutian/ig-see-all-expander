@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
+import { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourceRootDir = path.resolve(__dirname, "..");
@@ -20,7 +21,16 @@ let apiToken = "";
 let runtimeMode = "source";
 let appVersion = sourcePackage.version || "0.1.0";
 let openPathHandler = null;
+let openExternalHandler = null;
 let server = null;
+let connectorHttpServer = null;
+let connectorWss = null;
+let connectorPort = 0;
+let connectorSecret = "";
+let connectorExtensionDir = "";
+let nextConnectorCommandId = 1;
+
+const connectorClients = new Map();
 
 const jobs = new Map();
 let nextJobId = 1;
@@ -53,10 +63,10 @@ async function handleRequest(req, res) {
       return sendJson(res, 401, { error: "Unauthorized local app request." });
     }
     if (url.pathname === "/api/browser/discover" && req.method === "GET") {
-      return sendJson(res, 200, { browsers: await discoverBrowsers() });
+      return sendJson(res, 200, await discoverBrowserSessions());
     }
-    if (url.pathname === "/api/browser/launch-chrome" && req.method === "POST") {
-      return sendJson(res, 200, await launchChromeForInstagram());
+    if (url.pathname === "/api/browser/connector-info" && req.method === "GET") {
+      return sendJson(res, 200, getConnectorInfo());
     }
     if (url.pathname === "/api/browser/status" && req.method === "GET") {
       const cdpUrl = normalizeCdpUrl(url.searchParams.get("cdpUrl") || "");
@@ -67,10 +77,12 @@ async function handleRequest(req, res) {
       const body = await readJsonBody(req);
       const seeds = normalizeInputHandles(body.handlesText || body.seeds || "");
       const cdpUrl = normalizeCdpUrl(body.cdpUrl || "");
+      const sessionId = String(body.sessionId || "");
       const outputName = safeOutputName(body.outputName || "");
       if (!seeds.length) return sendJson(res, 400, { error: "Please enter at least one Instagram handle." });
-      if (!cdpUrl) return sendJson(res, 400, { error: "Please choose or enter a browser CDP URL." });
-      const job = createJob({ seeds, cdpUrl, outputName });
+      const session = resolveBrowserSession({ sessionId, cdpUrl });
+      if (!session) return sendJson(res, 400, { error: "Please choose a live browser session or enter a Manual CDP URL." });
+      const job = createJob({ seeds, session, outputName });
       runJob(job).catch((error) => failJob(job, error));
       return sendJson(res, 200, { jobId: job.id });
     }
@@ -102,6 +114,14 @@ async function handleRequest(req, res) {
       await openDirectory(logDir);
       return sendJson(res, 200, { ok: true, path: logDir });
     }
+    if (url.pathname === "/api/system/open-connector" && req.method === "POST") {
+      await openDirectory(connectorExtensionDir);
+      return sendJson(res, 200, { ok: true, path: connectorExtensionDir });
+    }
+    if (url.pathname === "/api/system/open-chrome-extensions" && req.method === "POST") {
+      await openExternalUrl("chrome://extensions/");
+      return sendJson(res, 200, { ok: true, url: "chrome://extensions/" });
+    }
     if (url.pathname === "/api/system/info" && req.method === "GET") {
       return sendJson(res, 200, {
         name: "IG See All Expander",
@@ -110,6 +130,8 @@ async function handleRequest(req, res) {
         dataDir,
         outputDir,
         logDir,
+        connectorPort,
+        connectorExtensionDir,
       });
     }
     return serveStatic(url.pathname, res);
@@ -133,11 +155,16 @@ export async function startLocalServer(options = {}) {
   runtimeMode = options.mode || "source";
   appVersion = options.version || sourcePackage.version || "0.1.0";
   openPathHandler = typeof options.openPath === "function" ? options.openPath : null;
+  openExternalHandler = typeof options.openExternal === "function" ? options.openExternal : null;
 
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(outputDir, { recursive: true });
   fs.mkdirSync(chromeProfileDir, { recursive: true });
   fs.mkdirSync(logDir, { recursive: true });
+  connectorSecret = await ensureConnectorSecret();
+  connectorExtensionDir = path.join(dataDir, "chrome-connector");
+  writeConnectorExtension(connectorExtensionDir, connectorSecret);
+  await startConnectorServer();
   jobs.clear();
   nextJobId = 1;
 
@@ -171,6 +198,7 @@ export async function startLocalServer(options = {}) {
         server.close(resolve);
         server.closeAllConnections?.();
       });
+      await stopConnectorServer();
       logRuntime("info", "Local service stopped.");
       server = null;
     },
@@ -181,7 +209,386 @@ export function createAccessToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-async function discoverBrowsers() {
+async function ensureConnectorSecret() {
+  const configPath = path.join(dataDir, "connector.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (typeof parsed.secret === "string" && parsed.secret.length >= 24) return parsed.secret;
+  } catch {
+    // A missing connector config is normal on first launch.
+  }
+  const secret = crypto.randomBytes(24).toString("hex");
+  fs.writeFileSync(configPath, `${JSON.stringify({ schemaVersion: 1, secret, createdAt: new Date().toISOString() }, null, 2)}\n`, "utf8");
+  return secret;
+}
+
+async function startConnectorServer() {
+  if (connectorHttpServer?.listening) return;
+  for (let candidatePort = 47620; candidatePort <= 47639; candidatePort += 1) {
+    const started = await tryStartConnectorOnPort(candidatePort);
+    if (started) {
+      connectorPort = candidatePort;
+      logRuntime("info", `Chrome connector listening at ws://127.0.0.1:${connectorPort}/connector.`);
+      return;
+    }
+  }
+  throw new Error("No available Chrome connector port between 47620 and 47639.");
+}
+
+function tryStartConnectorOnPort(candidatePort) {
+  return new Promise((resolve) => {
+    const httpServer = http.createServer((req, res) => {
+      if (req.url === "/health") return sendJson(res, 200, { ok: true });
+      res.writeHead(404);
+      res.end("Not found");
+    });
+    const wss = new WebSocketServer({ noServer: true });
+    httpServer.on("upgrade", (req, socket, head) => {
+      const requestUrl = new URL(req.url || "/", `http://127.0.0.1:${candidatePort}`);
+      if (requestUrl.pathname !== "/connector" || requestUrl.searchParams.get("secret") !== connectorSecret) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+    });
+    wss.on("connection", registerConnectorClient);
+    httpServer.once("error", () => {
+      wss.close();
+      resolve(false);
+    });
+    httpServer.listen(candidatePort, "127.0.0.1", () => {
+      connectorHttpServer = httpServer;
+      connectorWss = wss;
+      resolve(true);
+    });
+  });
+}
+
+async function stopConnectorServer() {
+  for (const client of connectorClients.values()) client.ws.close();
+  connectorClients.clear();
+  await new Promise((resolve) => connectorWss?.close(() => resolve()) || resolve());
+  await new Promise((resolve) => connectorHttpServer?.close(() => resolve()) || resolve());
+  connectorWss = null;
+  connectorHttpServer = null;
+  connectorPort = 0;
+}
+
+function registerConnectorClient(ws) {
+  const clientId = crypto.randomBytes(12).toString("hex");
+  const client = {
+    id: clientId,
+    ws,
+    connectedAt: Date.now(),
+    lastSeen: Date.now(),
+    browserType: "Chrome",
+    browserName: "",
+    profileName: "",
+    tabs: [],
+    pending: new Map(),
+  };
+  connectorClients.set(clientId, client);
+  ws.on("message", (raw) => handleConnectorMessage(client, raw));
+  ws.on("close", () => connectorClients.delete(clientId));
+  ws.on("error", () => connectorClients.delete(clientId));
+  ws.send(JSON.stringify({ type: "welcome", clientId, protocolVersion: 1 }));
+}
+
+function handleConnectorMessage(client, raw) {
+  let message = null;
+  try {
+    message = JSON.parse(String(raw));
+  } catch {
+    return;
+  }
+  client.lastSeen = Date.now();
+  if (message.type === "hello" || message.type === "heartbeat") {
+    client.browserType = message.browserType || "Chrome";
+    client.browserName = message.browserName || client.browserName || "Chrome";
+    client.profileName = message.profileName || client.profileName || "";
+    client.tabs = Array.isArray(message.tabs) ? message.tabs : [];
+    return;
+  }
+  if (message.type === "result" || message.type === "error") {
+    const pending = client.pending.get(message.id);
+    if (!pending) return;
+    client.pending.delete(message.id);
+    if (message.type === "error") pending.reject(new Error(message.error || "Chrome connector command failed."));
+    else pending.resolve(message.result);
+  }
+}
+
+function sendConnectorCommand(client, command, payload = {}, timeoutMs = 30000) {
+  if (!client || client.ws.readyState !== 1) throw new Error("Chrome connector is not connected.");
+  const id = nextConnectorCommandId++;
+  client.ws.send(JSON.stringify({ type: "command", id, command, payload }));
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      client.pending.delete(id);
+      reject(new Error(`Chrome connector timeout: ${command}`));
+    }, timeoutMs);
+    client.pending.set(id, {
+      resolve: (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    });
+  });
+}
+
+function liveConnectorClients() {
+  const now = Date.now();
+  return [...connectorClients.values()].filter((client) => client.ws.readyState === 1 && now - client.lastSeen < 15000);
+}
+
+function getConnectorInfo() {
+  return {
+    ok: Boolean(connectorPort),
+    port: connectorPort,
+    extensionDir: connectorExtensionDir,
+    connectedClients: liveConnectorClients().length,
+  };
+}
+
+function writeConnectorExtension(targetDir, secret) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  const ports = [];
+  for (let candidatePort = 47620; candidatePort <= 47639; candidatePort += 1) ports.push(candidatePort);
+  fs.writeFileSync(
+    path.join(targetDir, "manifest.json"),
+    `${JSON.stringify(
+      {
+        manifest_version: 3,
+        name: "IG See All Expander Connector",
+        version: appVersion,
+        description: "Connects an already-open Instagram tab in Chrome to the local IG See All Expander app.",
+        permissions: ["tabs", "cookies", "debugger"],
+        host_permissions: ["https://www.instagram.com/*", "http://127.0.0.1/*", "ws://127.0.0.1/*"],
+        background: { service_worker: "background.js" },
+        action: { default_title: "IG See All Expander Connector" },
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(targetDir, "config.js"),
+    `self.IG_SEE_ALL_CONNECTOR_CONFIG = ${JSON.stringify({ secret, ports, protocolVersion: 1 }, null, 2)};\n`,
+    "utf8"
+  );
+  fs.writeFileSync(path.join(targetDir, "background.js"), connectorBackgroundJs(), "utf8");
+  fs.writeFileSync(
+    path.join(targetDir, "README.txt"),
+    [
+      "IG See All Expander Connector",
+      "",
+      "Install once in Chrome:",
+      "1. Open chrome://extensions/",
+      "2. Enable Developer mode",
+      "3. Click Load unpacked",
+      `4. Choose this folder: ${targetDir}`,
+      "",
+      "After installing, keep your logged-in Instagram tab open and click Scan in IG See All Expander.",
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+function connectorBackgroundJs() {
+  return String.raw`importScripts("config.js");
+
+const config = self.IG_SEE_ALL_CONNECTOR_CONFIG || { ports: [], secret: "" };
+let socket = null;
+let activePortIndex = 0;
+let reconnectTimer = null;
+
+connect();
+chrome.tabs.onUpdated.addListener(queueHeartbeat);
+chrome.tabs.onRemoved.addListener(queueHeartbeat);
+chrome.tabs.onActivated.addListener(queueHeartbeat);
+
+function connect() {
+  clearTimeout(reconnectTimer);
+  if (!config.secret || !Array.isArray(config.ports) || !config.ports.length) return;
+  const port = config.ports[activePortIndex % config.ports.length];
+  activePortIndex += 1;
+  try {
+    socket = new WebSocket("ws://127.0.0.1:" + port + "/connector?secret=" + encodeURIComponent(config.secret));
+  } catch {
+    reconnectSoon();
+    return;
+  }
+  socket.addEventListener("open", () => sendHello("hello"));
+  socket.addEventListener("message", handleMessage);
+  socket.addEventListener("close", reconnectSoon);
+  socket.addEventListener("error", () => {
+    try { socket.close(); } catch {}
+  });
+}
+
+function reconnectSoon() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connect, 1200);
+}
+
+function queueHeartbeat() {
+  setTimeout(() => sendHello("heartbeat"), 250);
+}
+
+async function sendHello(type = "heartbeat") {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const tabs = await getInstagramTabs();
+  socket.send(JSON.stringify({
+    type,
+    protocolVersion: config.protocolVersion || 1,
+    browserType: "Chrome",
+    browserName: navigator.userAgent,
+    tabs,
+  }));
+}
+
+async function getInstagramTabs() {
+  const tabs = await chrome.tabs.query({ url: ["https://www.instagram.com/*"] });
+  return tabs
+    .filter((tab) => tab.id && tab.url && !/\/accounts\/login/i.test(tab.url))
+    .map((tab) => ({
+      id: tab.id,
+      title: tab.title || "",
+      url: tab.url || "",
+      active: Boolean(tab.active),
+      windowId: tab.windowId,
+    }));
+}
+
+async function handleMessage(event) {
+  let message = null;
+  try { message = JSON.parse(event.data); } catch { return; }
+  if (message.type === "welcome") {
+    sendHello("hello");
+    return;
+  }
+  if (message.type !== "command") return;
+  try {
+    const result = await handleCommand(message.command, message.payload || {});
+    socket.send(JSON.stringify({ type: "result", id: message.id, result }));
+    sendHello("heartbeat");
+  } catch (error) {
+    socket.send(JSON.stringify({ type: "error", id: message.id, error: String(error && error.message ? error.message : error) }));
+  }
+}
+
+async function handleCommand(command, payload) {
+  if (command === "status") return statusForTab(payload.tabId);
+  if (command === "cdp") return runCdpLikeCommand(payload.tabId, payload.method, payload.params || {});
+  throw new Error("Unknown command: " + command);
+}
+
+async function statusForTab(tabId) {
+  const tab = await chrome.tabs.get(Number(tabId));
+  const cookies = await chrome.cookies.getAll({ url: "https://www.instagram.com/" }).catch(() => []);
+  const hasSessionCookie = cookies.some((cookie) => ["sessionid", "ds_user_id"].includes(cookie.name) && String(cookie.value || "").trim());
+  let text = "";
+  try {
+    const result = await sendDebuggerCommand(tab.id, "Runtime.evaluate", {
+      expression: "(() => document.body ? document.body.innerText.slice(0, 1200) : '')()",
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    text = result?.result?.value || "";
+  } catch {}
+  const positiveText = /Profile|Messages|Suggested for you|followers|following|Follow|Home|Search|Explore|Reels|\u9996\u9875|\u4e3b\u9875|\u641c\u7d22|\u63a2\u7d22|\u6d88\u606f|\u901a\u77e5|\u4e2a\u4eba\u4e3b\u9875|\u7c89\u4e1d|\u6b63\u5728\u5173\u6ce8|\u63a8\u8350/i.test(text || "");
+  const loginText = /Log in|Sign up to see|Sign up|Phone number, username, or email|\u767b\u5f55|\u6ce8\u518c|\u624b\u673a\u53f7\u3001\u7528\u6237\u540d\u6216\u90ae\u7bb1|\u90ae\u7bb1\u5730\u5740\u6216\u624b\u673a\u53f7/i.test(text || "");
+  return {
+    ok: true,
+    title: tab.title || "",
+    currentUrl: tab.url || "",
+    hasSessionCookie,
+    loginLikely: hasSessionCookie || (positiveText && !loginText),
+  };
+}
+
+async function runCdpLikeCommand(tabId, method, params) {
+  tabId = Number(tabId);
+  if (!tabId) throw new Error("Missing tabId");
+  if (method === "Page.bringToFront") {
+    const tab = await chrome.tabs.get(tabId);
+    await chrome.windows.update(tab.windowId, { focused: true });
+    await chrome.tabs.update(tabId, { active: true });
+    return {};
+  }
+  if (method === "Page.navigate") {
+    if (!params.url || !/^https:\/\/www\.instagram\.com\//i.test(params.url)) throw new Error("Only Instagram navigation is allowed.");
+    await chrome.tabs.update(tabId, { url: params.url, active: true });
+    await waitForTabComplete(tabId, 20000).catch(() => {});
+    return {};
+  }
+  if (method === "Network.getCookies") {
+    const cookies = await chrome.cookies.getAll({ url: "https://www.instagram.com/" }).catch(() => []);
+    return { cookies };
+  }
+  return sendDebuggerCommand(tabId, method, params || {});
+}
+
+async function sendDebuggerCommand(tabId, method, params = {}) {
+  const target = { tabId: Number(tabId) };
+  await chrome.debugger.attach(target, "1.3").catch((error) => {
+    const message = String(error && error.message ? error.message : error);
+    if (!/Another debugger|already attached|already connected/i.test(message)) throw error;
+  });
+  return chrome.debugger.sendCommand(target, method, params || {});
+}
+
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(async () => {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.status === "complete") {
+          cleanup();
+          resolve();
+        } else if (Date.now() - started > timeoutMs) {
+          cleanup();
+          reject(new Error("Tab load timeout"));
+        }
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    }, 350);
+    function cleanup() {
+      clearInterval(timer);
+    }
+  });
+}
+`;
+}
+
+async function discoverBrowserSessions() {
+  const [cdpBrowsers, extensionBrowsers] = await Promise.all([discoverCdpBrowsers(), discoverExtensionBrowsers()]);
+  const all = [...extensionBrowsers, ...cdpBrowsers];
+  const browsers = all
+    .filter((item) => item.ok && item.instagramTabs?.length && item.loginLikely)
+    .sort((a, b) => browserCandidateScore(b) - browserCandidateScore(a));
+  return {
+    browsers,
+    diagnostics: {
+      cdpCandidates: cdpBrowsers.length,
+      connectorClients: liveConnectorClients().length,
+      connectorPort,
+      connectorExtensionDir,
+      hiddenNoLoginOrNoInstagram: all.length - browsers.length,
+    },
+  };
+}
+
+async function discoverCdpBrowsers() {
   const profileDirs = new Map();
   const debugPorts = new Map();
   const processes = await getChromiumProcesses();
@@ -225,6 +632,19 @@ async function discoverBrowsers() {
     if (!debugPorts.has(debugPort)) debugPorts.set(debugPort, { debugPort, browserType: "Unknown Chromium", source: "common-port", processId: "", userDataDir: "" });
   }
 
+  for (const listener of await getLoopbackListeners()) {
+    if (debugPorts.has(listener.port)) continue;
+    const proc = processes.find((item) => String(item.processId) === String(listener.processId));
+    if (!proc || !looksLikeChromiumProcess(proc)) continue;
+    debugPorts.set(listener.port, {
+      debugPort: listener.port,
+      browserType: detectBrowserType(proc.name || "", proc.commandLine || ""),
+      source: "listener",
+      processId: proc.processId || "",
+      userDataDir: extractUserDataDir(proc.commandLine || ""),
+    });
+  }
+
   const out = [];
   for (const candidate of debugPorts.values()) {
     const cdpUrl = `http://127.0.0.1:${candidate.debugPort}`;
@@ -235,7 +655,9 @@ async function discoverBrowsers() {
     }));
     if (candidate.source === "common-port" && !(status.instagramTabs || []).length) continue;
     out.push({
-      id: `${candidate.debugPort}`,
+      id: `cdp:${candidate.debugPort}`,
+      sessionId: `cdp:${candidate.debugPort}`,
+      sessionType: "cdp",
       cdpUrl,
       debugPort: candidate.debugPort,
       userDataDir: candidate.userDataDir || "",
@@ -253,71 +675,41 @@ async function discoverBrowsers() {
     });
   }
   const sorted = out.sort((a, b) => browserCandidateScore(b) - browserCandidateScore(a));
-  const live = sorted.filter((item) => item.ok);
-  return live.length ? live : sorted;
+  return sorted.filter((item) => item.ok);
 }
 
-async function launchChromeForInstagram() {
-  if (process.platform !== "win32") throw new Error("Chrome launcher is currently supported on Windows only.");
-  const chromePath = findChromeExecutable();
-  if (!chromePath) throw new Error("Chrome was not found. Please install Google Chrome or use Manual CDP URL.");
-  fs.mkdirSync(chromeProfileDir, { recursive: true });
-
-  const existingPort = await findExistingManagedChromePort();
-  if (existingPort) {
-    const cdpUrl = `http://127.0.0.1:${existingPort}`;
-    await waitForCdp(cdpUrl, 5000);
-    return {
-      ok: true,
-      reused: true,
-      cdpUrl,
-      debugPort: existingPort,
-      browserType: "Chrome",
-      userDataDir: chromeProfileDir,
-    };
+async function discoverExtensionBrowsers() {
+  const out = [];
+  for (const client of liveConnectorClients()) {
+    const instagramTabs = (client.tabs || []).filter((tab) => String(tab.url || "").includes("instagram.com"));
+    for (const tab of instagramTabs) {
+      const status = await sendConnectorCommand(client, "status", { tabId: tab.id }, 8000).catch((error) => ({
+        ok: false,
+        error: String(error?.message || error),
+      }));
+      out.push({
+        id: `extension:${client.id}:${tab.id}`,
+        sessionId: `extension:${client.id}:${tab.id}`,
+        sessionType: "extension",
+        cdpUrl: "",
+        debugPort: 0,
+        userDataDir: "",
+        source: "chrome-connector",
+        browserType: "Chrome",
+        processId: "",
+        ok: Boolean(status.ok),
+        loginLikely: Boolean(status.loginLikely),
+        hasSessionCookie: Boolean(status.hasSessionCookie),
+        title: status.title || tab.title || "",
+        currentUrl: status.currentUrl || tab.url || "",
+        instagramTabs: [{ title: status.title || tab.title || "", url: status.currentUrl || tab.url || "", id: String(tab.id) }],
+        browserName: client.browserName || "",
+        profileName: client.profileName || "",
+        error: status.error || "",
+      });
+    }
   }
-
-  const debugPort = await findAvailableDebugPort(9223, 9235);
-  const args = [
-    `--remote-debugging-port=${debugPort}`,
-    `--user-data-dir=${chromeProfileDir}`,
-    "--new-window",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "https://www.instagram.com/",
-  ];
-  const child = spawn(chromePath, args, {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: false,
-  });
-  child.unref();
-  const cdpUrl = `http://127.0.0.1:${debugPort}`;
-  await waitForCdp(cdpUrl, 20000);
-  return {
-    ok: true,
-    cdpUrl,
-    debugPort,
-    browserType: "Chrome",
-    userDataDir: chromeProfileDir,
-  };
-}
-
-async function findExistingManagedChromePort() {
-  const processes = await getChromiumProcesses();
-  const normalizedProfileName = path.basename(chromeProfileDir).toLowerCase();
-  for (const proc of processes) {
-    const commandLine = proc.commandLine || "";
-    if (!/chrome\.exe/i.test(proc.name || "") && !/Google\\Chrome/i.test(commandLine)) continue;
-    if (!commandLine.toLowerCase().includes(normalizedProfileName)) continue;
-    const portNumber = extractRemoteDebuggingPort(commandLine);
-    if (!portNumber) continue;
-    const ready = await fetchJson(`http://127.0.0.1:${portNumber}/json/version`, {}, 800)
-      .then(() => true)
-      .catch(() => false);
-    if (ready) return portNumber;
-  }
-  return 0;
+  return out;
 }
 
 async function probeBrowserCandidate(cdpUrl, candidate = {}) {
@@ -346,7 +738,7 @@ async function getChromiumProcesses() {
   const script =
     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
     "Get-CimInstance Win32_Process | " +
-    "Where-Object { $_.Name -match 'YunBrowser|AllweTouch|chrome|msedge' } | " +
+    "Where-Object { $_.CommandLine -and ($_.CommandLine -match '--remote-debugging-port|--user-data-dir|DevToolsActivePort|instagram|Chrome|Chromium|Browser|Yun|Allwe|AdsPower|Dolphin|BitBrowser|Hubstudio|MoreLogin|ixBrowser|VMLogin|GoLogin|Multilogin|Kameleo|Incogniton|Octo|ClonBrowser|Edge|msedge') } | " +
     "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Depth 3";
   const stdout = await execFileText("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]).catch(() => "");
   if (!stdout.trim()) return [];
@@ -357,6 +749,27 @@ async function getChromiumProcesses() {
     name: item.Name,
     commandLine: item.CommandLine || "",
   }));
+}
+
+async function getLoopbackListeners() {
+  if (process.platform !== "win32") return [];
+  const script =
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+    "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | " +
+    "Where-Object { $_.LocalAddress -in @('127.0.0.1','::1') -and $_.LocalPort -ge 1024 } | " +
+    "Select-Object LocalPort,OwningProcess | ConvertTo-Json -Depth 3";
+  const stdout = await execFileText("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]).catch(() => "");
+  if (!stdout.trim()) return [];
+  const parsed = JSON.parse(stdout);
+  const list = Array.isArray(parsed) ? parsed : [parsed];
+  return list
+    .map((item) => ({ port: Number(item.LocalPort), processId: item.OwningProcess }))
+    .filter((item) => Number.isFinite(item.port) && item.port > 0);
+}
+
+function looksLikeChromiumProcess(proc) {
+  const text = `${proc.name || ""} ${proc.commandLine || ""}`;
+  return /chrome|chromium|msedge|browser|yun|allwetouch|adspower|dolphin|bitbrowser|hubstudio|morelogin|ixbrowser|vmlogin|gologin|multilogin|kameleo|incogniton|octo|clonbrowser|devtoolsactiveport|--user-data-dir/i.test(text);
 }
 
 function findLikelyYunProfileDirs() {
@@ -394,6 +807,19 @@ function detectBrowserType(name, commandLine) {
   const text = `${name || ""} ${commandLine || ""}`;
   if (/AllweTouch/i.test(text)) return "AllweTouch";
   if (/YunBrowser/i.test(text)) return "YunBrowser";
+  if (/AdsPower/i.test(text)) return "AdsPower";
+  if (/Dolphin/i.test(text)) return "Dolphin Anty";
+  if (/BitBrowser/i.test(text)) return "BitBrowser";
+  if (/Hubstudio/i.test(text)) return "Hubstudio";
+  if (/MoreLogin/i.test(text)) return "MoreLogin";
+  if (/ixBrowser/i.test(text)) return "ixBrowser";
+  if (/VMLogin/i.test(text)) return "VMLogin";
+  if (/GoLogin/i.test(text)) return "GoLogin";
+  if (/Multilogin/i.test(text)) return "Multilogin";
+  if (/Kameleo/i.test(text)) return "Kameleo";
+  if (/Incogniton/i.test(text)) return "Incogniton";
+  if (/Octo/i.test(text)) return "Octo Browser";
+  if (/ClonBrowser/i.test(text)) return "ClonBrowser";
   if (/chrome\.exe|Google\\Chrome|Google\/Chrome/i.test(text)) return "Chrome";
   if (/msedge\.exe|Microsoft\\Edge|Microsoft\/Edge/i.test(text)) return "Edge";
   return "Unknown Chromium";
@@ -412,37 +838,6 @@ function commonDebugPorts() {
   const ports = [];
   for (let portNumber = 9222; portNumber <= 9230; portNumber += 1) ports.push(portNumber);
   return ports;
-}
-
-async function findAvailableDebugPort(start, end) {
-  for (let portNumber = start; portNumber <= end; portNumber += 1) {
-    const open = await fetchJson(`http://127.0.0.1:${portNumber}/json/version`, {}, 500)
-      .then(() => true)
-      .catch(() => false);
-    if (!open) return portNumber;
-  }
-  throw new Error(`No available Chrome debug port between ${start} and ${end}.`);
-}
-
-async function waitForCdp(cdpUrl, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const ready = await fetchJson(`${cdpUrl}/json/version`, {}, 800)
-      .then(() => true)
-      .catch(() => false);
-    if (ready) return true;
-    await sleep(300);
-  }
-  throw new Error(`Chrome started, but ${cdpUrl} did not become ready in time.`);
-}
-
-function findChromeExecutable() {
-  const candidates = [
-    path.join(process.env.ProgramFiles || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
-    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
-    path.join(process.env.LocalAppData || "", "Google", "Chrome", "Application", "chrome.exe"),
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
 }
 
 async function getBrowserStatus(cdpUrl) {
@@ -465,8 +860,8 @@ async function getBrowserStatus(cdpUrl) {
       const cookies = Array.isArray(cookieResult.cookies) ? cookieResult.cookies : [];
       hasSessionCookie = cookies.some((cookie) => ["sessionid", "ds_user_id"].includes(cookie.name) && String(cookie.value || "").trim());
       const text = await evaluate(cdp, `(() => document.body ? document.body.innerText.slice(0, 1200) : '')()`);
-      const positiveText = /Profile|Messages|Suggested for you|followers|following|Follow|Home|Search|Explore|Reels|首页|主页|搜索|探索|消息|通知|个人主页|粉丝|正在关注|推荐/i.test(text);
-      const loginText = /Log in|Sign up to see|Sign up|Phone number, username, or email|登录|注册|手机号、用户名或邮箱|邮箱地址或手机号/i.test(text);
+      const positiveText = /Profile|Messages|Suggested for you|followers|following|Follow|Home|Search|Explore|Reels|\u9996\u9875|\u4e3b\u9875|\u641c\u7d22|\u63a2\u7d22|\u6d88\u606f|\u901a\u77e5|\u4e2a\u4eba\u4e3b\u9875|\u7c89\u4e1d|\u6b63\u5728\u5173\u6ce8|\u63a8\u8350/i.test(text);
+      const loginText = /Log in|Sign up to see|Sign up|Phone number, username, or email|\u767b\u5f55|\u6ce8\u518c|\u624b\u673a\u53f7\u3001\u7528\u6237\u540d\u6216\u90ae\u7bb1|\u90ae\u7bb1\u5730\u5740\u6216\u624b\u673a\u53f7/i.test(text);
       loginLikely = hasSessionCookie || (positiveText && !loginText);
       currentUrl = tab.url || currentUrl;
       title = tab.title || title;
@@ -477,12 +872,30 @@ async function getBrowserStatus(cdpUrl) {
   return { ok: true, loginLikely, hasSessionCookie, title, currentUrl, instagramTabs };
 }
 
-function createJob({ seeds, cdpUrl, outputName }) {
+function resolveBrowserSession({ sessionId, cdpUrl }) {
+  if (sessionId?.startsWith("extension:")) {
+    const [, clientId, tabId] = sessionId.split(":");
+    const client = connectorClients.get(clientId);
+    if (!client || client.ws.readyState !== 1) return null;
+    const tab = (client.tabs || []).find((item) => String(item.id) === String(tabId));
+    if (!tab) return null;
+    return { type: "extension", sessionId, clientId, tabId: Number(tabId), label: "Chrome Connector" };
+  }
+  if (sessionId?.startsWith("cdp:")) {
+    const portNumber = Number(sessionId.split(":")[1]);
+    if (Number.isFinite(portNumber) && portNumber > 0) return { type: "cdp", sessionId, cdpUrl: `http://127.0.0.1:${portNumber}` };
+  }
+  if (cdpUrl) return { type: "cdp", sessionId: `manual:${cdpUrl}`, cdpUrl };
+  return null;
+}
+
+function createJob({ seeds, session, outputName }) {
   const id = String(nextJobId++);
   const job = {
     id,
     seeds,
-    cdpUrl,
+    session,
+    cdpUrl: session.cdpUrl || "",
     outputName,
     status: "running",
     cancelled: false,
@@ -501,7 +914,7 @@ function createJob({ seeds, cdpUrl, outputName }) {
 }
 
 async function runJob(job) {
-  emit(job, "log", { level: "info", message: `Starting ${job.seeds.length} seed account(s).` });
+  emit(job, "log", { level: "info", message: `Starting ${job.seeds.length} seed account(s) with ${job.session.type === "extension" ? "Chrome connector" : job.session.cdpUrl}.` });
   const allRows = [];
   const seedSet = new Set(job.seeds);
 
@@ -510,7 +923,7 @@ async function runJob(job) {
     const seed = job.seeds[index];
     emit(job, "seed:start", { seed, index, total: job.seeds.length });
     try {
-      const result = await collectSeed({ cdpUrl: job.cdpUrl, seed, seedSet, job });
+      const result = await collectSeed({ session: job.session, seed, seedSet, job });
       job.bySeed.push(result);
       for (const handle of result.handles) allRows.push({ source: seed, handle });
       emit(job, "seed:done", { seed, count: result.handles.length });
@@ -537,46 +950,66 @@ async function runJob(job) {
   fs.writeFileSync(job.filePath, `${handles.join("\n")}${handles.length ? "\n" : ""}`, "utf8");
 
   emit(job, "enrich:start", { total: handles.length });
-  job.enrichedRows = await enrichHandles({ cdpUrl: job.cdpUrl, handles, job });
+  job.enrichedRows = await enrichHandles({ session: job.session, handles, job });
   await writeExcel(job.excelPath, job.enrichedRows);
 
   job.status = job.cancelled ? "cancelled" : "done";
   emit(job, "done", { status: job.status, count: handles.length, filename, excelFilename });
 }
 
-async function enrichHandles({ cdpUrl, handles, job }) {
-  if (!handles.length || job.cancelled) return handles.map((handle) => ({ handle, followers: "未知", email: "没有" }));
-  const tab = await getAnyInstagramTab(cdpUrl);
-  const cdp = await connect(tab.webSocketDebuggerUrl);
+async function enrichHandles({ session, handles, job }) {
+  if (!handles.length || job.cancelled) return handles.map((handle) => ({ handle, followers: "\u672a\u77e5", email: "\u6ca1\u6709" }));
+  const page = await createBrowserPage(session);
   const rows = [];
   try {
-    await cdp.send("Runtime.enable");
+    await page.send("Runtime.enable");
     for (let index = 0; index < handles.length; index += 1) {
       const handle = handles[index];
       if (job.cancelled) break;
       emit(job, "enrich:progress", { index: index + 1, total: handles.length, handle });
       try {
-        const info = await getProfileInfoByApi(cdp, handle);
+        const info = await getProfileInfoByApi(page, handle);
         rows.push({
           handle,
           followers: formatFollowers(info.followers),
-          email: extractEmails(info.bio).join("; ") || "没有",
+          email: extractEmails(info.bio).join("; ") || "\u6ca1\u6709",
         });
       } catch (error) {
         emit(job, "log", { level: "warn", message: `Profile fallback for @${handle}: ${String(error?.message || error)}` });
-        const fallback = await getProfileInfoByPage(cdp, handle).catch(() => ({ followers: null, bio: "" }));
+        const fallback = await getProfileInfoByPage(page, handle).catch(() => ({ followers: null, bio: "" }));
         rows.push({
           handle,
           followers: formatFollowers(fallback.followers),
-          email: extractEmails(fallback.bio).join("; ") || "没有",
+          email: extractEmails(fallback.bio).join("; ") || "\u6ca1\u6709",
         });
       }
       await sleep(450);
     }
   } finally {
-    cdp.close();
+    page.close();
   }
   return rows;
+}
+
+async function createBrowserPage(session, seed = "") {
+  if (session.type === "extension") return createExtensionPage(session);
+  if (seed) {
+    const tab = await getOrOpenInstagramTab(session.cdpUrl, seed);
+    return connect(tab.webSocketDebuggerUrl);
+  }
+  const tab = await getAnyInstagramTab(session.cdpUrl);
+  return connect(tab.webSocketDebuggerUrl);
+}
+
+function createExtensionPage(session) {
+  const client = connectorClients.get(session.clientId);
+  if (!client || client.ws.readyState !== 1) throw new Error("Chrome connector is no longer connected. Click Scan and choose the Chrome tab again.");
+  return {
+    send(method, params = {}) {
+      return sendConnectorCommand(client, "cdp", { tabId: session.tabId, method, params });
+    },
+    close() {},
+  };
 }
 
 async function getAnyInstagramTab(cdpUrl) {
@@ -649,9 +1082,8 @@ async function writeExcel(filePath, rows) {
   await workbook.xlsx.writeFile(filePath);
 }
 
-async function collectSeed({ cdpUrl, seed, seedSet, job }) {
-  const tab = await getOrOpenInstagramTab(cdpUrl, seed);
-  const cdp = await connect(tab.webSocketDebuggerUrl);
+async function collectSeed({ session, seed, seedSet, job }) {
+  const cdp = await createBrowserPage(session, seed);
   try {
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable").catch(() => {});
@@ -1041,6 +1473,17 @@ async function openDirectory(targetPath) {
   child.unref();
 }
 
+async function openExternalUrl(targetUrl) {
+  if (openExternalHandler) {
+    const error = await openExternalHandler(targetUrl);
+    if (error) throw new Error(error);
+    return;
+  }
+  if (process.platform !== "win32") throw new Error("Opening Chrome URLs is currently supported on Windows only.");
+  const child = spawn("rundll32.exe", ["url.dll,FileProtocolHandler", targetUrl], { detached: true, stdio: "ignore", windowsHide: true });
+  child.unref();
+}
+
 function logRuntime(level, message) {
   const line = `[${new Date().toISOString()}] [${String(level).toUpperCase()}] ${String(message)}\n`;
   try {
@@ -1127,10 +1570,10 @@ function extractEmails(text) {
 }
 
 function formatFollowers(value) {
-  if (value === null || value === undefined || value === "") return "未知";
+  if (value === null || value === undefined || value === "") return "\u672a\u77e5";
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const text = String(value).trim();
-  if (!text) return "未知";
+  if (!text) return "\u672a\u77e5";
   return text;
 }
 

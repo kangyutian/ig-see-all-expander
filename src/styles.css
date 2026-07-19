@@ -141,6 +141,7 @@ input {
 
 .browserActions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -152,6 +153,27 @@ input {
 
 .chromeButton {
   color: #1f2937;
+}
+
+.connectorHint {
+  background: #f8fafc;
+  border: 1px solid #e2e7ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 10px 11px;
+}
+
+.connectorHint strong {
+  color: #202939;
+  font-size: 12px;
+}
+
+.connectorHint span {
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .browserList {

@@ -39,10 +39,22 @@ test("local server protects APIs and exposes desktop system paths", async (conte
   assert.equal(info.mode, "test");
   assert.equal(info.dataDir, dataDir);
   assert.equal(info.outputDir, path.join(dataDir, "outputs"));
+  assert.equal(info.connectorExtensionDir, path.join(dataDir, "chrome-connector"));
+  assert.ok(fs.existsSync(path.join(info.connectorExtensionDir, "manifest.json")));
+
+  const connectorInfo = await fetch(`${service.url}/api/browser/connector-info`, {
+    headers: { "X-App-Token": "test-token" },
+  });
+  assert.equal(connectorInfo.status, 200);
+  const connector = await connectorInfo.json();
+  assert.equal(connector.extensionDir, path.join(dataDir, "chrome-connector"));
+  assert.ok(connector.port >= 47620);
 
   const openOutputs = await fetch(`${service.url}/api/system/open-outputs?token=test-token`, { method: "POST" });
   assert.equal(openOutputs.status, 200);
-  assert.deepEqual(openedPaths, [path.join(dataDir, "outputs")]);
+  const openConnector = await fetch(`${service.url}/api/system/open-connector?token=test-token`, { method: "POST" });
+  assert.equal(openConnector.status, 200);
+  assert.deepEqual(openedPaths, [path.join(dataDir, "outputs"), path.join(dataDir, "chrome-connector")]);
 
   const staticPage = await fetch(`${service.url}/`);
   assert.equal(staticPage.status, 200);

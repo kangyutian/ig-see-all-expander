@@ -1,10 +1,10 @@
 {
   "name": "ig-see-all-expander",
   "productName": "IG See All Expander",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Windows desktop tool for full Instagram Suggested for you handle capture and profile enrichment.",
   "author": "kangyutian",
-  "private": true,
+  "private": false,
   "type": "module",
   "main": "electron/main.mjs",
   "engines": {
@@ -20,7 +20,8 @@
     "dist:win": "npm run build && electron-builder --win nsis portable --x64 --publish never"
   },
   "dependencies": {
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.3",
@@ -52,11 +53,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

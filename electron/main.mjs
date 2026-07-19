@@ -66,6 +66,7 @@ async function startDesktopApp() {
     mode: "desktop",
     version: app.getVersion(),
     openPath: (targetPath) => shell.openPath(targetPath),
+    openExternal: (targetUrl) => shell.openExternal(targetUrl).then(() => ""),
   });
   createApplicationMenu();
   createMainWindow(localService);

@@ -33,9 +33,9 @@ function App() {
   const [outputName, setOutputName] = useState("");
   const [manualCdpUrl, setManualCdpUrl] = useState("");
   const [browsers, setBrowsers] = useState([]);
-  const [selectedCdpUrl, setSelectedCdpUrl] = useState("");
+  const [selectedSessionId, setSelectedSessionId] = useState("");
   const [discovering, setDiscovering] = useState(false);
-  const [launchingChrome, setLaunchingChrome] = useState(false);
+  const [connectorInfo, setConnectorInfo] = useState(null);
   const [jobId, setJobId] = useState("");
   const [running, setRunning] = useState(false);
   const [complete, setComplete] = useState(false);
@@ -48,10 +48,12 @@ function App() {
   const logEndRef = useRef(null);
 
   const normalizedPreview = useMemo(() => normalizeHandles(handlesText), [handlesText]);
-  const activeCdpUrl = manualCdpUrl.trim() || selectedCdpUrl;
+  const selectedBrowser = browsers.find((browser) => browser.sessionId === selectedSessionId);
+  const activeSessionLabel = manualCdpUrl.trim() || selectedBrowser?.currentUrl || selectedBrowser?.cdpUrl || "Not selected";
 
   useEffect(() => {
     loadSystemInfo();
+    loadConnectorInfo();
     discoverBrowsers();
     return () => eventSourceRef.current?.close();
   }, []);
@@ -62,20 +64,21 @@ function App() {
 
   async function discoverBrowsers() {
     setDiscovering(true);
-    addLog("Scanning local AllweTouch/YunBrowser/Chrome sessions...", "info");
+    setBrowsers([]);
+    setSelectedSessionId("");
+    addLog("Scanning current fingerprint browser and Chrome connector sessions...", "info");
     try {
       const data = await apiGet("/api/browser/discover");
       setBrowsers(data.browsers || []);
-      const best =
-        (data.browsers || []).find((item) => item.loginLikely) ||
-        (data.browsers || []).find((item) => item.instagramTabs?.length) ||
-        (data.browsers || []).find((item) => /AllweTouch|YunBrowser|Chrome/i.test(item.browserType || "") && item.ok);
+      setConnectorInfo((prev) => ({ ...(prev || {}), ...(data.diagnostics || {}) }));
+      const best = (data.browsers || [])[0];
       if (best) {
         setManualCdpUrl("");
-        setSelectedCdpUrl(best.cdpUrl);
-        addLog(`Found ${best.browserType || "browser"} on ${best.cdpUrl}${best.loginLikely ? " with Instagram session" : ""}.`, "success");
+        setSelectedSessionId(best.sessionId);
+        addLog(`Found ${best.browserType || "browser"} ${best.source === "chrome-connector" ? "via Chrome Connector" : best.cdpUrl} with logged-in Instagram tab.`, "success");
       } else {
-        addLog("No controllable Instagram browser found. Normal Chrome cannot be scanned directly; click Launch Chrome and log in in that new window.", "warn");
+        const hidden = data.diagnostics?.hiddenNoLoginOrNoInstagram || 0;
+        addLog(`No live logged-in Instagram session found${hidden ? ` (${hidden} live candidate(s) hidden because IG/login was not confirmed)` : ""}. For normal Chrome, install the connector once and keep the logged-in Instagram tab open.`, "warn");
       }
     } catch (error) {
       addLog(error.message || String(error), "error");
@@ -84,25 +87,17 @@ function App() {
     }
   }
 
-  async function launchChrome() {
-    setLaunchingChrome(true);
-    addLog("Launching a dedicated Chrome window for Instagram...", "info");
-    try {
-      const data = await apiPost("/api/browser/launch-chrome", {});
-      setManualCdpUrl("");
-      setSelectedCdpUrl(data.cdpUrl);
-      addLog(`Chrome launched on ${data.cdpUrl}. Log in to Instagram there, then scan again.`, "success");
-      await discoverBrowsers();
-    } catch (error) {
-      addLog(error.message || String(error), "error");
-    } finally {
-      setLaunchingChrome(false);
-    }
-  }
-
   async function loadSystemInfo() {
     try {
       setSystemInfo(await apiGet("/api/system/info"));
+    } catch (error) {
+      addLog(error.message || String(error), "warn");
+    }
+  }
+
+  async function loadConnectorInfo() {
+    try {
+      setConnectorInfo(await apiGet("/api/browser/connector-info"));
     } catch (error) {
       addLog(error.message || String(error), "warn");
     }
@@ -117,13 +112,22 @@ function App() {
     }
   }
 
+  async function openChromeExtensions() {
+    try {
+      await apiPost("/api/system/open-chrome-extensions", {});
+      addLog("Opened chrome://extensions. Enable Developer mode, then Load unpacked.", "info");
+    } catch (error) {
+      addLog(error.message || String(error), "error");
+    }
+  }
+
   async function startJob() {
     if (!normalizedPreview.length) {
       addLog("Enter at least one Instagram handle.", "error");
       return;
     }
-    if (!activeCdpUrl) {
-      addLog("Choose a browser session or enter a CDP URL.", "error");
+    if (!manualCdpUrl.trim() && !selectedSessionId) {
+      addLog("Choose a live browser session or enter a Manual CDP URL.", "error");
       return;
     }
     eventSourceRef.current?.close();
@@ -136,7 +140,8 @@ function App() {
     try {
       const data = await apiPost("/api/expand", {
         handlesText,
-        cdpUrl: activeCdpUrl,
+        sessionId: manualCdpUrl.trim() ? "" : selectedSessionId,
+        cdpUrl: manualCdpUrl.trim(),
         outputName,
       });
       setJobId(data.jobId);
@@ -215,15 +220,18 @@ function App() {
       <section className="toolbar">
         <div>
           <h1>IG See All Expander</h1>
-          <p>AllweTouch session scanner · See all capture · Excel enrichment</p>
+          <p>Live browser scan - See all capture - Excel enrichment</p>
         </div>
         <div className="toolbarActions">
-          {systemInfo && <span className="versionBadge">v{systemInfo.version} · {systemInfo.mode}</span>}
+          {systemInfo && <span className="versionBadge">v{systemInfo.version} - {systemInfo.mode}</span>}
           <button className="iconButton" onClick={() => openSystemFolder("outputs")} title="Open output folder">
             <FolderOpen size={18} />
           </button>
           <button className="iconButton" onClick={() => openSystemFolder("logs")} title="Open log folder">
             <ScrollText size={18} />
+          </button>
+          <button className="iconButton" onClick={() => openSystemFolder("connector")} title="Open Chrome connector folder">
+            <Chrome size={18} />
           </button>
           <button className="iconButton" onClick={discoverBrowsers} disabled={discovering} title="Scan browser sessions">
             {discovering ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />}
@@ -259,46 +267,58 @@ function App() {
             <span>{browsers.length} found</span>
           </div>
           <div className="browserActions">
-            <button className="secondary compactButton" onClick={discoverBrowsers} disabled={discovering || launchingChrome}>
+            <button className="secondary compactButton" onClick={discoverBrowsers} disabled={discovering}>
               {discovering ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
               Scan
             </button>
-            <button className="secondary compactButton chromeButton" onClick={launchChrome} disabled={launchingChrome || discovering}>
-              {launchingChrome ? <Loader2 className="spin" size={16} /> : <Chrome size={16} />}
-              Launch Chrome
+            <button className="secondary compactButton chromeButton" onClick={() => openSystemFolder("connector")}>
+              <FolderOpen size={16} />
+              Connector folder
             </button>
+            <button className="secondary compactButton chromeButton" onClick={openChromeExtensions}>
+              <Chrome size={16} />
+              Chrome extensions
+            </button>
+          </div>
+          <div className="connectorHint">
+            <strong>Chrome Connector</strong>
+            <span>
+              {connectorInfo?.connectedClients
+                ? `${connectorInfo.connectedClients} Chrome connector(s) online.`
+                : "For normal Chrome, install the connector once, keep the logged-in Instagram tab open, then Scan."}
+            </span>
           </div>
           <div className="browserList">
             {browsers.map((browser) => (
               <label
-                className={`browserItem ${selectedCdpUrl === browser.cdpUrl && !manualCdpUrl ? "selected" : ""}`}
-                key={`${browser.cdpUrl}-${browser.userDataDir}-${browser.source}`}
+                className={`browserItem ${selectedSessionId === browser.sessionId && !manualCdpUrl ? "selected" : ""}`}
+                key={`${browser.sessionId}-${browser.userDataDir}-${browser.source}`}
               >
                 <input
                   type="radio"
                   name="browser"
-                  checked={selectedCdpUrl === browser.cdpUrl && !manualCdpUrl}
+                  checked={selectedSessionId === browser.sessionId && !manualCdpUrl}
                   onChange={() => {
                     setManualCdpUrl("");
-                    setSelectedCdpUrl(browser.cdpUrl);
+                    setSelectedSessionId(browser.sessionId);
                   }}
                 />
                 <span>
                   <strong>
-                    <em>{browser.browserType || "Browser"}</em>
-                    {browser.cdpUrl}
+                    <em>{browser.source === "chrome-connector" ? "Chrome Connector" : browser.browserType || "Browser"}</em>
+                    {browser.source === "chrome-connector" ? browser.currentUrl : browser.cdpUrl}
                   </strong>
                   <small>{browser.currentUrl || browser.userDataDir || browser.browserName || browser.source}</small>
                   <small className="browserMeta">
                     {browser.instagramTabs?.length ? `${browser.instagramTabs.length} Instagram tab(s)` : "No Instagram tab"}
-                    {" · "}
+                    {" - "}
                     {browser.hasSessionCookie ? "Session cookie detected" : browser.loginLikely ? "Logged in likely" : "Login not confirmed"}
                   </small>
                 </span>
                 {browser.loginLikely ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}
               </label>
             ))}
-            {!browsers.length && <p className="empty">Open AllweTouch, or click Launch Chrome. Normal Chrome must be launched by this app to be controllable.</p>}
+            {!browsers.length && <p className="empty">Open a logged-in Instagram tab in a detectable fingerprint browser, or install the Chrome Connector for normal Chrome.</p>}
           </div>
           <label className="manualField">
             Manual CDP URL
@@ -320,7 +340,7 @@ function App() {
         <div className="panel resultsPanel">
           <div className="statusGrid">
             <Metric icon={<Radar size={19} />} label="Unique handles" value={complete ? totalCount : running ? "Running" : "Ready"} />
-            <Metric icon={<TerminalSquare size={19} />} label="Session" value={activeCdpUrl || "Not selected"} />
+            <Metric icon={<TerminalSquare size={19} />} label="Session" value={activeSessionLabel} />
           </div>
 
           <div className="phaseGrid">

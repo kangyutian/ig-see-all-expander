@@ -3,6 +3,8 @@ dist/
 release/
 outputs/
 chrome-profile/
+chrome-connector/
+connector.json
 logs/
 output/
 .playwright-cli/
