@@ -78,7 +78,11 @@ function App() {
         addLog(`Found ${best.browserType || "browser"} ${best.source === "chrome-connector" ? "via Chrome Connector" : best.cdpUrl} with logged-in Instagram tab.`, "success");
       } else {
         const hidden = data.diagnostics?.hiddenNoLoginOrNoInstagram || 0;
-        addLog(`No live logged-in Instagram session found${hidden ? ` (${hidden} live candidate(s) hidden because IG/login was not confirmed)` : ""}. For normal Chrome, install the connector once and keep the logged-in Instagram tab open.`, "warn");
+        const normalChrome = data.diagnostics?.normalChromeWithoutDebug || 0;
+        addLog(
+          `No live logged-in controllable Instagram session found${hidden ? ` (${hidden} candidate(s) hidden because IG/login was not confirmed)` : ""}${normalChrome ? `. Normal Chrome is open, but Chrome does not expose control access unless the Connector is installed or Chrome was started with a debug port` : ""}.`,
+          "warn"
+        );
       }
     } catch (error) {
       addLog(error.message || String(error), "error");
@@ -285,7 +289,7 @@ function App() {
             <span>
               {connectorInfo?.connectedClients
                 ? `${connectorInfo.connectedClients} Chrome connector(s) online.`
-                : "For normal Chrome, install the connector once, keep the logged-in Instagram tab open, then Scan."}
+                : "Normal Chrome cannot be controlled directly. Load this Connector once to reuse your existing logged-in Instagram tab."}
             </span>
           </div>
           <div className="browserList">
@@ -318,7 +322,7 @@ function App() {
                 {browser.loginLikely ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}
               </label>
             ))}
-            {!browsers.length && <p className="empty">Open a logged-in Instagram tab in a detectable fingerprint browser, or install the Chrome Connector for normal Chrome.</p>}
+            {!browsers.length && <p className="empty">Open a logged-in Instagram tab in a detectable fingerprint browser. For normal Chrome, load the Connector once, then Scan.</p>}
           </div>
           <label className="manualField">
             Manual CDP URL

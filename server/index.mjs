@@ -31,6 +31,7 @@ let connectorExtensionDir = "";
 let nextConnectorCommandId = 1;
 
 const connectorClients = new Map();
+let cachedChromiumProcesses = [];
 
 const jobs = new Map();
 let nextJobId = 1;
@@ -584,6 +585,7 @@ async function discoverBrowserSessions() {
       connectorPort,
       connectorExtensionDir,
       hiddenNoLoginOrNoInstagram: all.length - browsers.length,
+      normalChromeWithoutDebug: countNormalChromeWithoutDebug(),
     },
   };
 }
@@ -592,6 +594,7 @@ async function discoverCdpBrowsers() {
   const profileDirs = new Map();
   const debugPorts = new Map();
   const processes = await getChromiumProcesses();
+  cachedChromiumProcesses = processes;
   for (const proc of processes) {
     const browserType = detectBrowserType(proc.name || "", proc.commandLine || "");
     const userDataDir = extractUserDataDir(proc.commandLine || "");
@@ -765,6 +768,17 @@ async function getLoopbackListeners() {
   return list
     .map((item) => ({ port: Number(item.LocalPort), processId: item.OwningProcess }))
     .filter((item) => Number.isFinite(item.port) && item.port > 0);
+}
+
+function countNormalChromeWithoutDebug() {
+  let count = 0;
+  for (const proc of cachedChromiumProcesses) {
+    const text = `${proc.name || ""} ${proc.commandLine || ""}`;
+    if (!/chrome\.exe|Google\\Chrome|Google\/Chrome/i.test(text)) continue;
+    if (extractRemoteDebuggingPort(proc.commandLine || "")) continue;
+    count += 1;
+  }
+  return count;
 }
 
 function looksLikeChromiumProcess(proc) {
@@ -1474,6 +1488,13 @@ async function openDirectory(targetPath) {
 }
 
 async function openExternalUrl(targetUrl) {
+  if (/^chrome:\/\//i.test(targetUrl)) {
+    const chromePath = findChromeExecutable();
+    if (!chromePath) throw new Error("Google Chrome was not found. Please open Chrome manually and go to chrome://extensions/.");
+    const child = spawn(chromePath, [targetUrl], { detached: true, stdio: "ignore", windowsHide: false });
+    child.unref();
+    return;
+  }
   if (openExternalHandler) {
     const error = await openExternalHandler(targetUrl);
     if (error) throw new Error(error);
@@ -1482,6 +1503,15 @@ async function openExternalUrl(targetUrl) {
   if (process.platform !== "win32") throw new Error("Opening Chrome URLs is currently supported on Windows only.");
   const child = spawn("rundll32.exe", ["url.dll,FileProtocolHandler", targetUrl], { detached: true, stdio: "ignore", windowsHide: true });
   child.unref();
+}
+
+function findChromeExecutable() {
+  const candidates = [
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe"),
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
 }
 
 function logRuntime(level, message) {
