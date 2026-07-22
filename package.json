@@ -1,8 +1,8 @@
 {
   "name": "ig-see-all-expander",
   "productName": "IG See All Expander",
-  "version": "0.3.6",
-  "description": "Windows desktop tool for full Instagram Suggested for you handle capture and profile enrichment.",
+  "version": "0.4.0",
+  "description": "Windows desktop tool for full Instagram Suggested and Followers handle capture with profile enrichment.",
   "author": "kangyutian",
   "private": false,
   "type": "module",

@@ -7,6 +7,8 @@ import {
   collectProfileEmails,
   createBottomConfirmationState,
   isOpenConnectorClient,
+  parseInstagramCount,
+  resolveEnrichmentLimit,
   startLocalServer,
   updateBottomConfirmation,
   writeExcel,
@@ -44,6 +46,21 @@ test("See all bottom confirmation resets when lazy loading changes height or han
   assert.equal(state.complete, false);
 });
 
+test("Instagram follower counts preserve exact values and parse abbreviated labels", () => {
+  assert.deepEqual(parseInstagramCount("3,545 followers"), { value: 3545, exact: true, raw: "3,545 followers" });
+  assert.deepEqual(parseInstagramCount("51.6\u4e07\u7c89\u4e1d"), { value: 516000, exact: false, raw: "51.6\u4e07\u7c89\u4e1d" });
+  assert.deepEqual(parseInstagramCount("1.2M followers"), { value: 1200000, exact: false, raw: "1.2M followers" });
+  assert.equal(parseInstagramCount("Followers"), null);
+});
+
+test("follower enrichment keeps none, first 500, and all as independent ranges", () => {
+  assert.equal(resolveEnrichmentLimit("followers", "none", 800), 0);
+  assert.equal(resolveEnrichmentLimit("followers", "first500", 800), 500);
+  assert.equal(resolveEnrichmentLimit("followers", "first500", 120), 120);
+  assert.equal(resolveEnrichmentLimit("followers", "all", 800), 800);
+  assert.equal(resolveEnrichmentLimit("suggested", "none", 800), 800);
+});
+
 test("profile email collection combines expanded bio and public contact fields", () => {
   assert.deepEqual(
     collectProfileEmails({
@@ -76,6 +93,7 @@ test("Excel export contains handle, followers, following, and email", async () =
 test("local server protects APIs and exposes desktop system paths", async (context) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ig-see-all-test-"));
   const openedPaths = [];
+  const openedUrls = [];
   const service = await startLocalServer({
     dataDir,
     distDir: path.resolve("dist"),
@@ -86,6 +104,10 @@ test("local server protects APIs and exposes desktop system paths", async (conte
     version: "9.9.9",
     openPath: async (targetPath) => {
       openedPaths.push(targetPath);
+      return "";
+    },
+    openExternal: async (targetUrl) => {
+      openedUrls.push(targetUrl);
       return "";
     },
   });
@@ -129,7 +151,10 @@ test("local server protects APIs and exposes desktop system paths", async (conte
   assert.equal(openOutputs.status, 200);
   const openConnector = await fetch(`${service.url}/api/system/open-connector?token=test-token`, { method: "POST" });
   assert.equal(openConnector.status, 200);
+  const openInstagram = await fetch(`${service.url}/api/system/open-instagram?token=test-token`, { method: "POST" });
+  assert.equal(openInstagram.status, 200);
   assert.deepEqual(openedPaths, [path.join(dataDir, "outputs"), path.join(dataDir, "chrome-connector")]);
+  assert.deepEqual(openedUrls, ["https://www.instagram.com/"]);
 
   const staticPage = await fetch(`${service.url}/`);
   assert.equal(staticPage.status, 200);

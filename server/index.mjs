@@ -59,6 +59,9 @@ const reservedHandles = new Set([
 
 const BOTTOM_CONFIRMATION_ROUNDS = 8;
 const NON_BOTTOM_STALL_LIMIT = 18;
+const NOT_CAPTURED = "\u672a\u6293\u53d6";
+const UNKNOWN_VALUE = "\u672a\u77e5";
+const NO_EMAIL = "\u6ca1\u6709";
 
 async function handleRequest(req, res) {
   try {
@@ -83,10 +86,12 @@ async function handleRequest(req, res) {
       const cdpUrl = normalizeCdpUrl(body.cdpUrl || "");
       const sessionId = String(body.sessionId || "");
       const outputName = safeOutputName(body.outputName || "");
+      const captureMode = normalizeCaptureMode(body.captureMode);
+      const enrichmentMode = normalizeEnrichmentMode(body.enrichmentMode, captureMode);
       if (!seeds.length) return sendJson(res, 400, { error: "Please enter at least one Instagram handle." });
       const session = resolveBrowserSession({ sessionId, cdpUrl });
       if (!session) return sendJson(res, 400, { error: "Please choose a live browser session or enter a Manual CDP URL." });
-      const job = createJob({ seeds, session, outputName });
+      const job = createJob({ seeds, session, outputName, captureMode, enrichmentMode });
       runJob(job).catch((error) => failJob(job, error));
       return sendJson(res, 200, { jobId: job.id });
     }
@@ -125,6 +130,10 @@ async function handleRequest(req, res) {
     if (url.pathname === "/api/system/open-chrome-extensions" && req.method === "POST") {
       await openExternalUrl("chrome://extensions/");
       return sendJson(res, 200, { ok: true, url: "chrome://extensions/" });
+    }
+    if (url.pathname === "/api/system/open-instagram" && req.method === "POST") {
+      await openExternalUrl("https://www.instagram.com/");
+      return sendJson(res, 200, { ok: true, url: "https://www.instagram.com/" });
     }
     if (url.pathname === "/api/system/info" && req.method === "GET") {
       return sendJson(res, 200, {
@@ -956,7 +965,54 @@ function resolveBrowserSession({ sessionId, cdpUrl }) {
   return null;
 }
 
-function createJob({ seeds, session, outputName }) {
+function normalizeCaptureMode(value) {
+  return String(value || "").toLowerCase() === "followers" ? "followers" : "suggested";
+}
+
+function normalizeEnrichmentMode(value, captureMode) {
+  if (captureMode !== "followers") return "all";
+  const normalized = String(value || "").toLowerCase();
+  return ["none", "first500", "all"].includes(normalized) ? normalized : "first500";
+}
+
+export function resolveEnrichmentLimit(captureMode, enrichmentMode, total) {
+  const safeTotal = Math.max(0, Number(total) || 0);
+  if (captureMode !== "followers" || enrichmentMode === "all") return safeTotal;
+  if (enrichmentMode === "none") return 0;
+  return Math.min(500, safeTotal);
+}
+
+function createNotCapturedRow(handle) {
+  return { handle, followers: NOT_CAPTURED, following: NOT_CAPTURED, email: NOT_CAPTURED };
+}
+
+export function parseInstagramCount(value) {
+  const raw = String(value || "").replace(/[\u00a0\u202f]/g, " ").trim();
+  if (!raw) return null;
+  const match = raw.toLowerCase().match(/([0-9]+(?:[.,\s][0-9]+)*)(?:\s*)(k|m|b|万|\u842c|亿|\u5104)?/i);
+  if (!match) return null;
+  const suffix = String(match[2] || "").toLowerCase();
+  const numericText = match[1].replace(/\s/g, "");
+  if (!suffix) {
+    const integer = Number(numericText.replace(/[.,]/g, ""));
+    return Number.isFinite(integer) ? { value: integer, exact: true, raw } : null;
+  }
+  let decimalText = numericText;
+  if (decimalText.includes(",") && decimalText.includes(".")) {
+    decimalText = decimalText.lastIndexOf(".") > decimalText.lastIndexOf(",")
+      ? decimalText.replace(/,/g, "")
+      : decimalText.replace(/\./g, "").replace(",", ".");
+  } else {
+    decimalText = decimalText.replace(",", ".");
+  }
+  const numeric = Number(decimalText);
+  const multipliers = { k: 1_000, m: 1_000_000, b: 1_000_000_000, "万": 10_000, "\u842c": 10_000, "亿": 100_000_000, "\u5104": 100_000_000 };
+  const multiplier = multipliers[suffix];
+  if (!Number.isFinite(numeric) || !multiplier) return null;
+  return { value: Math.round(numeric * multiplier), exact: false, raw };
+}
+
+function createJob({ seeds, session, outputName, captureMode = "suggested", enrichmentMode = "all" }) {
   const id = String(nextJobId++);
   const job = {
     id,
@@ -964,6 +1020,8 @@ function createJob({ seeds, session, outputName }) {
     session,
     cdpUrl: session.cdpUrl || "",
     outputName,
+    captureMode,
+    enrichmentMode,
     status: "running",
     cancelled: false,
     events: [],
@@ -976,32 +1034,57 @@ function createJob({ seeds, session, outputName }) {
     createdAt: new Date().toISOString(),
   };
   jobs.set(id, job);
-  emit(job, "status", { status: "running", seeds });
+  emit(job, "status", { status: "running", seeds, captureMode, enrichmentMode });
   return job;
 }
 
 async function runJob(job) {
-  emit(job, "log", { level: "info", message: `Starting ${job.seeds.length} seed account(s) with ${job.session.type === "extension" ? "Chrome connector" : job.session.cdpUrl}.` });
+  const modeLabel = job.captureMode === "followers" ? "Followers" : "Suggested";
+  emit(job, "log", { level: "info", message: `Starting ${job.seeds.length} seed account(s) in ${modeLabel} mode with ${job.session.type === "extension" ? "Chrome connector" : job.session.cdpUrl}.` });
   const allRows = [];
   const seedSet = new Set(job.seeds);
 
   for (let index = 0; index < job.seeds.length; index += 1) {
     if (job.cancelled) break;
     const seed = job.seeds[index];
-    emit(job, "seed:start", { seed, index, total: job.seeds.length });
+    emit(job, "seed:start", { seed, index, total: job.seeds.length, captureMode: job.captureMode });
     try {
-      const result = await collectSeed({ session: job.session, seed, seedSet, job });
+      const collector = job.captureMode === "followers" ? collectFollowerSeed : collectSuggestedSeed;
+      const result = await collector({ session: job.session, seed, seedSet, job });
       job.bySeed.push(result);
-      for (const handle of result.handles) allRows.push({ source: seed, handle });
       if (result.cancelled) {
-        emit(job, "seed:cancelled", { seed, count: result.handles.length });
+        emit(job, "seed:cancelled", { seed, count: result.handles.length, captureMode: job.captureMode });
         break;
       }
-      emit(job, "seed:done", { seed, count: result.handles.length, bottomConfirmed: true });
+      if (result.unavailable) {
+        emit(job, "seed:unavailable", {
+          seed,
+          count: 0,
+          expectedCount: result.expectedCount,
+          reason: result.reason,
+          captureMode: job.captureMode,
+        });
+        continue;
+      }
+      if (!result.bottomConfirmed) continue;
+      for (const handle of result.handles) allRows.push({ source: seed, handle });
+      const eventData = {
+        seed,
+        count: result.handles.length,
+        expectedCount: result.expectedCount,
+        expectedCountExact: result.expectedCountExact,
+        bottomConfirmed: true,
+        captureMode: job.captureMode,
+      };
+      if (result.limited) {
+        emit(job, "seed:limited", { ...eventData, reason: result.reason });
+      } else {
+        emit(job, "seed:done", eventData);
+      }
     } catch (error) {
       const message = String(error?.message || error);
       job.bySeed.push({ seed, error: message, handles: [] });
-      emit(job, "seed:error", { seed, error: message });
+      emit(job, "seed:error", { seed, error: message, captureMode: job.captureMode });
     }
   }
 
@@ -1013,27 +1096,52 @@ async function runJob(job) {
     handles.push(row.handle);
   }
   job.rows = handles;
-  const basename = job.outputName || `ig-see-all-handles-${timestampForFile()}`;
+  const defaultPrefix = job.captureMode === "followers" ? "ig-followers-handles" : "ig-see-all-handles";
+  const basename = job.outputName || `${defaultPrefix}-${timestampForFile()}`;
   const filename = `${basename}.txt`;
   const excelFilename = `${basename}.xlsx`;
   job.filePath = path.join(outputDir, filename);
   job.excelPath = path.join(outputDir, excelFilename);
   fs.writeFileSync(job.filePath, `${handles.join("\n")}${handles.length ? "\n" : ""}`, "utf8");
 
-  emit(job, "enrich:start", { total: handles.length });
-  job.enrichedRows = await enrichHandles({ session: job.session, handles, job });
+  const enrichmentLimit = resolveEnrichmentLimit(job.captureMode, job.enrichmentMode, handles.length);
+  emit(job, "enrich:start", {
+    total: enrichmentLimit,
+    handleTotal: handles.length,
+    skipped: Math.max(0, handles.length - enrichmentLimit),
+    mode: job.enrichmentMode,
+  });
+  const handlesToEnrich = handles.slice(0, enrichmentLimit);
+  const enrichmentResult = await enrichHandles({ session: job.session, handles: handlesToEnrich, job });
+  const capturedByHandle = new Map(enrichmentResult.rows.map((row) => [row.handle, row]));
+  job.enrichedRows = handles.map((handle) => capturedByHandle.get(handle) || createNotCapturedRow(handle));
   await writeExcel(job.excelPath, job.enrichedRows);
+  emit(job, "enrich:done", {
+    current: enrichmentResult.attempted,
+    total: enrichmentLimit,
+    handleTotal: handles.length,
+    skipped: Math.max(0, handles.length - enrichmentLimit),
+    mode: job.enrichmentMode,
+  });
 
   job.status = job.cancelled ? "cancelled" : "done";
-  emit(job, "done", { status: job.status, count: handles.length, filename, excelFilename });
+  emit(job, "done", {
+    status: job.status,
+    count: handles.length,
+    filename,
+    excelFilename,
+    captureMode: job.captureMode,
+    enrichmentMode: job.enrichmentMode,
+  });
 }
 
 async function enrichHandles({ session, handles, job }) {
   if (!handles.length || job.cancelled) {
-    return handles.map((handle) => ({ handle, followers: "\u672a\u77e5", following: "\u672a\u77e5", email: "\u6ca1\u6709" }));
+    return { rows: handles.map(createNotCapturedRow), attempted: 0 };
   }
   const page = await createBrowserPage(session);
   const rows = [];
+  let attempted = 0;
   try {
     await page.send("Runtime.enable");
     for (let index = 0; index < handles.length; index += 1) {
@@ -1041,8 +1149,11 @@ async function enrichHandles({ session, handles, job }) {
       if (job.cancelled) break;
       emit(job, "enrich:progress", { index: index + 1, total: handles.length, handle });
       let pageInfo = { followers: null, following: null, bio: "", contactText: "", bioExpanded: false };
+      let pageChecked = false;
+      let apiChecked = false;
       try {
         pageInfo = await getProfileInfoByPage(page, handle);
+        pageChecked = true;
         emit(job, "enrich:progress", {
           index: index + 1,
           total: handles.length,
@@ -1056,12 +1167,13 @@ async function enrichHandles({ session, handles, job }) {
       }
       try {
         const apiInfo = await getProfileInfoByApi(page, handle);
+        apiChecked = true;
         const info = mergeProfileInfo(apiInfo, pageInfo);
         rows.push({
           handle,
           followers: formatCount(info.followers),
           following: formatCount(info.following),
-          email: collectProfileEmails(info).join("; ") || "\u6ca1\u6709",
+          email: collectProfileEmails(info).join("; ") || (pageChecked || apiChecked ? NO_EMAIL : UNKNOWN_VALUE),
         });
       } catch (error) {
         emit(job, "log", { level: "warn", message: `Profile API fallback for @${handle}: ${String(error?.message || error)}` });
@@ -1069,22 +1181,23 @@ async function enrichHandles({ session, handles, job }) {
           handle,
           followers: formatCount(pageInfo.followers),
           following: formatCount(pageInfo.following),
-          email: collectProfileEmails(pageInfo).join("; ") || "\u6ca1\u6709",
+          email: collectProfileEmails(pageInfo).join("; ") || (pageChecked ? NO_EMAIL : UNKNOWN_VALUE),
         });
       }
+      attempted += 1;
       await sleep(450);
     }
     if (rows.length < handles.length) {
       const completedHandles = new Set(rows.map((row) => row.handle));
       for (const handle of handles) {
         if (completedHandles.has(handle)) continue;
-        rows.push({ handle, followers: "\u672a\u77e5", following: "\u672a\u77e5", email: "\u6ca1\u6709" });
+        rows.push(createNotCapturedRow(handle));
       }
     }
   } finally {
     page.close();
   }
-  return rows;
+  return { rows, attempted };
 }
 
 async function createBrowserPage(session, seed = "") {
@@ -1265,7 +1378,7 @@ export async function writeExcel(filePath, rows) {
   await workbook.xlsx.writeFile(filePath);
 }
 
-async function collectSeed({ session, seed, seedSet, job }) {
+async function collectSuggestedSeed({ session, seed, seedSet, job }) {
   const cdp = await createBrowserPage(session, seed);
   try {
     await cdp.send("Runtime.enable");
@@ -1311,11 +1424,16 @@ async function collectSeed({ session, seed, seedSet, job }) {
       emit(job, "seed:progress", {
         seed,
         count: handles.size,
+        capturedCount: handles.size,
+        expectedCount: null,
         scrollTop: Math.max(0, scrollState.scrollTop),
+        scrollHeight: scrollState.scrollHeight,
         maxTop,
         atBottom: scrollState.atBottom,
         bottomStable: confirmation.stableBottomRounds,
+        stableBottomChecks: confirmation.stableBottomRounds,
         bottomRequired: BOTTOM_CONFIRMATION_ROUNDS,
+        captureMode: "suggested",
       });
 
       if (confirmation.complete) {
@@ -1351,10 +1469,373 @@ async function collectSeed({ session, seed, seedSet, job }) {
     }
 
     await closeDialog(cdp).catch(() => {});
-    return { seed, handles: [...handles.keys()], cancelled: false, bottomConfirmed: true };
+    return {
+      seed,
+      handles: [...handles.keys()],
+      cancelled: false,
+      bottomConfirmed: true,
+      expectedCount: null,
+      expectedCountExact: false,
+      limited: false,
+    };
   } finally {
     cdp.close();
   }
+}
+
+async function collectFollowerSeed({ session, seed, seedSet, job }) {
+  const cdp = await createBrowserPage(session, seed);
+  try {
+    await cdp.send("Runtime.enable");
+    await cdp.send("Page.enable").catch(() => {});
+    await cdp.send("Page.bringToFront").catch(() => {});
+    await cdp.send("Page.navigate", { url: `https://www.instagram.com/${seed}/` }).catch(() => {});
+    await sleep(6500);
+    if (job.cancelled) return { seed, handles: [], cancelled: true, bottomConfirmed: false };
+
+    const profileState = await waitForFollowerProfile(cdp, seed, 10000);
+    if (profileState.loginRequired) throw new Error("Instagram login expired. Log in again, then scan the browser session.");
+    if (profileState.challenge) throw new Error("Instagram challenge or checkpoint is blocking this profile.");
+    if (profileState.rateLimited) throw new Error("Instagram rate limit is blocking the follower list. Try again later.");
+    if (profileState.notFound) throw new Error("Instagram profile was not found or is unavailable.");
+
+    const expected = parseInstagramCount(profileState.followersText);
+    if (expected?.value === 0) {
+      emit(job, "log", { level: "success", message: `@${seed} has 0 visible followers.` });
+      return {
+        seed,
+        handles: [],
+        cancelled: false,
+        bottomConfirmed: true,
+        expectedCount: 0,
+        expectedCountExact: expected.exact,
+        limited: false,
+      };
+    }
+
+    let clickResult = await clickFollowersLink(cdp, seed);
+    if (!clickResult?.clicked) {
+      if (profileState.isPrivate || profileState.followersUnavailable) {
+        return followerUnavailableResult(seed, expected, "Current Instagram session cannot view this private or restricted follower list.");
+      }
+      throw new Error(`Followers link was not found. ${clickResult?.diagnostic || profileState.diagnostic || ""}`.trim());
+    }
+
+    let dialogState = await waitForFollowerDialog(cdp, 12000);
+    if (!dialogState.open && !dialogState.unavailable) {
+      // Profile controls can still be hydrating when the first trusted click lands.
+      clickResult = await clickFollowersLink(cdp, seed);
+      if (clickResult?.clicked) dialogState = await waitForFollowerDialog(cdp, 8000);
+    }
+    if (!dialogState.open) {
+      if (dialogState.unavailable || profileState.isPrivate) {
+        return followerUnavailableResult(seed, expected, dialogState.reason || "Current Instagram session cannot view this follower list.");
+      }
+      throw new Error(`Followers dialog did not open. ${dialogState.reason || ""}`.trim());
+    }
+
+    const handles = new Map();
+    let confirmation = createBottomConfirmationState();
+    let finalScrollState = null;
+    let bottomConfirmed = false;
+
+    for (let round = 0; !job.cancelled; round += 1) {
+      if (job.cancelled) break;
+      const items = await extractFollowerModal(cdp, seed, seedSet);
+      for (const handle of items) handles.set(handle, handle);
+
+      const scrollState = await scrollFollowerModal(cdp);
+      if (!scrollState?.dialogFound) throw new Error("Followers dialog closed before the full list was captured.");
+      finalScrollState = scrollState;
+      confirmation = updateBottomConfirmation(confirmation, scrollState, handles.size);
+      const maxTop = Math.max(0, scrollState.scrollHeight - scrollState.clientHeight);
+      emit(job, "seed:progress", {
+        seed,
+        count: handles.size,
+        capturedCount: handles.size,
+        expectedCount: expected?.value ?? null,
+        expectedCountExact: Boolean(expected?.exact),
+        scrollTop: Math.max(0, scrollState.scrollTop),
+        scrollHeight: scrollState.scrollHeight,
+        maxTop,
+        atBottom: scrollState.atBottom,
+        bottomStable: confirmation.stableBottomRounds,
+        stableBottomChecks: confirmation.stableBottomRounds,
+        bottomRequired: BOTTOM_CONFIRMATION_ROUNDS,
+        captureMode: "followers",
+      });
+
+      if (confirmation.complete) {
+        bottomConfirmed = true;
+        break;
+      }
+      if (confirmation.nonBottomStallRounds >= NON_BOTTOM_STALL_LIMIT) {
+        throw new Error(`Followers list could not reach the bottom (${Math.max(0, scrollState.scrollTop)}/${maxTop}). No partial result was accepted.`);
+      }
+      await sleep(scrollState.atBottom ? 1250 : 760);
+    }
+
+    if (job.cancelled) {
+      emit(job, "log", {
+        level: "warn",
+        message: `@${seed} stopped before follower-list bottom confirmation with ${handles.size} temporary handle(s). No partial result was accepted.`,
+      });
+      await closeFollowerDialog(cdp).catch(() => {});
+      return { seed, handles: [], cancelled: true, bottomConfirmed: false };
+    }
+
+    if (!bottomConfirmed) {
+      const maxTop = Math.max(0, (finalScrollState?.scrollHeight || 0) - (finalScrollState?.clientHeight || 0));
+      throw new Error(`Followers list did not pass full-bottom confirmation (${Math.max(0, finalScrollState?.scrollTop || 0)}/${maxTop}). No partial result was accepted.`);
+    }
+
+    const expectedCount = expected?.value ?? null;
+    const limited = Boolean(expected?.exact && expectedCount > handles.size);
+    const reason = limited
+      ? `Instagram exposed ${handles.size} follower(s) after the dialog bottom was confirmed, while the profile shows ${expectedCount}.`
+      : "";
+    if (finalScrollState) {
+      const maxTop = Math.max(0, finalScrollState.scrollHeight - finalScrollState.clientHeight);
+      emit(job, "log", {
+        level: limited ? "warn" : "success",
+        message: limited
+          ? `@${seed} follower dialog bottom confirmed, but the visible list is limited to ${handles.size}/${expectedCount}.`
+          : `@${seed} follower dialog bottom fully confirmed (${finalScrollState.scrollTop}/${maxTop}) after ${confirmation.stableBottomRounds} stable checks.`,
+      });
+    }
+
+    await closeFollowerDialog(cdp).catch(() => {});
+    return {
+      seed,
+      handles: [...handles.keys()],
+      cancelled: false,
+      bottomConfirmed: true,
+      expectedCount,
+      expectedCountExact: Boolean(expected?.exact),
+      limited,
+      reason,
+    };
+  } finally {
+    cdp.close();
+  }
+}
+
+function followerUnavailableResult(seed, expected, reason) {
+  return {
+    seed,
+    handles: [],
+    cancelled: false,
+    bottomConfirmed: false,
+    unavailable: true,
+    expectedCount: expected?.value ?? null,
+    expectedCountExact: Boolean(expected?.exact),
+    reason,
+  };
+}
+
+async function inspectFollowerProfile(cdp, seed) {
+  return evaluate(
+    cdp,
+    `(() => {
+      const seed = ${JSON.stringify(seed.toLowerCase())};
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const bodyText = normalize(document.body?.innerText || document.body?.textContent || '');
+      const currentUrl = String(location.href || '');
+      const links = [...document.querySelectorAll('a[href]')].map((a) => ({
+        href: String(a.getAttribute('href') || ''),
+        text: normalize(a.innerText || a.textContent),
+        aria: normalize((a.getAttribute('aria-label') || '') + ' ' + (a.getAttribute('title') || '')),
+        rect: a.getBoundingClientRect()
+      }));
+      const followerLink = links.find((item) => {
+        const href = item.href.toLowerCase().split('?')[0];
+        return href === '/' + seed + '/followers/' || href.endsWith('/' + seed + '/followers/');
+      }) || links.find((item) => /\\/followers\\/$/i.test(item.href));
+      const followerLabel = followerLink ? normalize(followerLink.text + ' ' + followerLink.aria) : '';
+      const privatePattern = /this account is private|follow this account to see their photos and videos|\\u6b64\\u5e10\\u53f7\\u4e3a\\u79c1\\u5bc6\\u5e10\\u53f7|\\u8fd9\\u662f\\u79c1\\u5bc6\\u5e10\\u6237|\\u9019\\u662f\\u79c1\\u4eba\\u5e33\\u865f|esta cuenta es privada|ce compte est priv\\u00e9|dieses konto ist privat/i;
+      const notFoundPattern = /sorry, this page isn't available|page isn't available|user not found|\\u62b1\\u6b49\\uff0c\\u6b64\\u9875\\u9762\\u65e0\\u6cd5\\u8bbf\\u95ee|\\u627e\\u4e0d\\u5230\\u7528\\u6237/i;
+      const loginPattern = /log in to instagram|sign up.*instagram|\\u767b\\u5f55 instagram|\\u767b\\u5165 instagram/i;
+      const challengePattern = /challenge|checkpoint|confirm it's you|confirm your identity|\\u786e\\u8ba4\\u4f60\\u7684\\u8eab\\u4efd/i;
+      const ratePattern = /please wait a few minutes|try again later|we limit how often|\\u8bf7\\u7a0d\\u5019\\u51e0\\u5206\\u949f|\\u8bf7\\u7a0d\\u540e\\u518d\\u8bd5/i;
+      return {
+        followersText: followerLabel,
+        hasFollowerLink: Boolean(followerLink),
+        isPrivate: privatePattern.test(bodyText),
+        followersUnavailable: privatePattern.test(bodyText) && !followerLink,
+        notFound: notFoundPattern.test(bodyText),
+        loginRequired: /\\/accounts\\/login/i.test(currentUrl) || loginPattern.test(bodyText),
+        challenge: /\\/challenge\\//i.test(currentUrl) || challengePattern.test(bodyText),
+        rateLimited: ratePattern.test(bodyText),
+        diagnostic: 'followerLink=' + Boolean(followerLink) + ', private=' + privatePattern.test(bodyText)
+      };
+    })()`
+  );
+}
+
+async function waitForFollowerProfile(cdp, seed, timeoutMs) {
+  const start = Date.now();
+  let latest = null;
+  while (Date.now() - start < timeoutMs) {
+    latest = await inspectFollowerProfile(cdp, seed).catch(() => latest);
+    if (latest?.hasFollowerLink || latest?.notFound || latest?.loginRequired || latest?.challenge || latest?.rateLimited) return latest;
+    await sleep(400);
+  }
+  return latest || {
+    followersText: "",
+    hasFollowerLink: false,
+    isPrivate: false,
+    followersUnavailable: false,
+    diagnostic: "Profile header did not finish loading.",
+  };
+}
+
+async function clickFollowersLink(cdp, seed) {
+  const target = await evaluate(
+    cdp,
+    `(() => {
+      const seed = ${JSON.stringify(seed.toLowerCase())};
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const visible = (rect) => rect.width > 12 && rect.height > 8 && rect.bottom > 0 && rect.top < window.innerHeight;
+      const links = [...document.querySelectorAll('a[href], [role=link], button, [role=button]')].map((el) => ({
+        el,
+        href: String(el.getAttribute('href') || ''),
+        label: normalize((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '')),
+        rect: el.getBoundingClientRect()
+      })).filter((item) => visible(item.rect));
+      let item = links.find((candidate) => {
+        const href = candidate.href.toLowerCase().split('?')[0];
+        return href === '/' + seed + '/followers/' || href.endsWith('/' + seed + '/followers/');
+      });
+      if (!item) item = links.find((candidate) => /followers|follower|\\u7c89\\u4e1d|\\u7c89\\u7d72|seguidores|abonn\\u00e9s/i.test(candidate.label) && candidate.rect.top < Math.min(window.innerHeight, 720));
+      if (!item) {
+        const visibleLabels = links.map((candidate) => candidate.label).filter(Boolean).filter((value, index, list) => list.indexOf(value) === index).slice(0, 12);
+        return { clicked: false, diagnostic: 'Visible profile controls: ' + visibleLabels.join(' | ') };
+      }
+      return {
+        clicked: true,
+        x: item.rect.left + item.rect.width / 2,
+        y: item.rect.top + item.rect.height / 2,
+        label: item.label,
+      };
+    })()`
+  );
+  if (!target?.clicked) return target;
+  await mouseClick(cdp, target);
+  return target;
+}
+
+async function waitForFollowerDialog(cdp, timeoutMs) {
+  const start = Date.now();
+  let latest = { open: false, unavailable: false, reason: "" };
+  while (Date.now() - start < timeoutMs) {
+    latest = await inspectFollowerDialog(cdp).catch(() => latest);
+    if (latest.open || latest.unavailable) return latest;
+    await sleep(400);
+  }
+  return latest;
+}
+
+async function inspectFollowerDialog(cdp) {
+  return evaluate(cdp, `(() => {
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const titlePattern = /^(followers?|\\u7c89\\u4e1d|\\u7c89\\u7d72|seguidores|abonn\\u00e9s|follower:innen)$/i;
+    const accessPattern = /this account is private|follow this account to see|unable to load|couldn't load|try again later|\\u79c1\\u5bc6\\u5e10\\u53f7|\\u79c1\\u4eba\\u5e33\\u865f|\\u65e0\\u6cd5\\u52a0\\u8f7d|\\u8bf7\\u7a0d\\u540e\\u518d\\u8bd5/i;
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+    const dialog = dialogs.find((node) => {
+      const text = String(node.innerText || node.textContent || '').trim();
+      const firstLine = normalize(text.split(/\\r?\\n/)[0]);
+      if (titlePattern.test(firstLine)) return true;
+      return [...node.querySelectorAll('h1, h2, h3, header, [role=heading]')].some((el) => titlePattern.test(normalize(el.innerText || el.textContent)));
+    });
+    const pageText = normalize(document.body?.innerText || document.body?.textContent || '');
+    return {
+      open: Boolean(dialog),
+      unavailable: !dialog && accessPattern.test(pageText),
+      reason: !dialog && accessPattern.test(pageText) ? 'Current Instagram session cannot view or load this follower list.' : ''
+    };
+  })()`);
+}
+
+async function extractFollowerModal(cdp, seed, seedSet) {
+  const data = await evaluate(
+    cdp,
+    `(() => {
+      const pageHandle = ${JSON.stringify(seed)};
+      const seedSet = new Set(${JSON.stringify([...seedSet])});
+      const reserved = new Set(${JSON.stringify([...reservedHandles])});
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const titlePattern = /^(followers?|\\u7c89\\u4e1d|\\u7c89\\u7d72|seguidores|abonn\\u00e9s|follower:innen)$/i;
+      const dialog = [...document.querySelectorAll('[role="dialog"]')].find((node) => {
+        const text = String(node.innerText || node.textContent || '').trim();
+        const firstLine = normalize(text.split(/\\r?\\n/)[0]);
+        return titlePattern.test(firstLine) || [...node.querySelectorAll('h1, h2, h3, header, [role=heading]')].some((el) => titlePattern.test(normalize(el.innerText || el.textContent)));
+      });
+      if (!dialog) return [];
+      const scrollBox = [...dialog.querySelectorAll('div')]
+        .filter((el) => el.scrollHeight > el.clientHeight + 20)
+        .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0] || dialog;
+      const items = [];
+      for (const a of [...scrollBox.querySelectorAll('a[href^="/"]')]) {
+        const href = String(a.getAttribute('href') || '').split('?')[0].split('#')[0];
+        const parts = href.split('/').filter(Boolean);
+        const handle = String(parts[0] || '').toLowerCase();
+        if (!handle || reserved.has(handle) || seedSet.has(handle) || handle === pageHandle) continue;
+        if (!/^[a-z0-9._]{3,30}$/.test(handle) || parts.length !== 1) continue;
+        items.push(handle);
+      }
+      return [...new Set(items)];
+    })()`
+  );
+  return Array.isArray(data) ? data : [];
+}
+
+async function scrollFollowerModal(cdp) {
+  const beforeState = await evaluate(cdp, followerScrollExpression());
+  if (!beforeState?.rect) return beforeState;
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x: beforeState.rect.x,
+    y: beforeState.rect.y,
+    deltaX: 0,
+    deltaY: Math.max(360, Math.floor((beforeState.clientHeight || 400) * 0.98)),
+  }).catch(() => {});
+  await sleep(140);
+  const afterState = await evaluate(cdp, followerScrollExpression(beforeState.scrollTop));
+  return { ...afterState, changed: Boolean(beforeState.changed || afterState.changed) };
+}
+
+function followerScrollExpression(previousScrollTop = null) {
+  return `(() => {
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const titlePattern = /^(followers?|\\u7c89\\u4e1d|\\u7c89\\u7d72|seguidores|abonn\\u00e9s|follower:innen)$/i;
+    const dialog = [...document.querySelectorAll('[role="dialog"]')].find((node) => {
+      const text = String(node.innerText || node.textContent || '').trim();
+      const firstLine = normalize(text.split(/\\r?\\n/)[0]);
+      return titlePattern.test(firstLine) || [...node.querySelectorAll('h1, h2, h3, header, [role=heading]')].some((el) => titlePattern.test(normalize(el.innerText || el.textContent)));
+    });
+    if (!dialog) return { dialogFound: false, changed: false, atBottom: false, scrollTop: -1, scrollHeight: 0, clientHeight: 0, rect: null };
+    const scrollBox = [...dialog.querySelectorAll('div')]
+      .filter((el) => el.scrollHeight > el.clientHeight + 20)
+      .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))[0] || dialog;
+    const before = scrollBox.scrollTop;
+    const rect = scrollBox.getBoundingClientRect();
+    scrollBox.scrollTop = Math.min(scrollBox.scrollTop + Math.max(200, Math.floor(scrollBox.clientHeight * 0.76)), scrollBox.scrollHeight);
+    scrollBox.dispatchEvent(new Event('scroll', { bubbles: true }));
+    return {
+      dialogFound: true,
+      changed: scrollBox.scrollTop !== ${previousScrollTop === null ? "before" : JSON.stringify(previousScrollTop)},
+      scrollTop: scrollBox.scrollTop,
+      scrollHeight: scrollBox.scrollHeight,
+      clientHeight: scrollBox.clientHeight,
+      atBottom: scrollBox.scrollTop >= scrollBox.scrollHeight - scrollBox.clientHeight - 3,
+      rect: { x: rect.left + rect.width / 2, y: rect.top + Math.min(rect.height - 12, Math.max(12, rect.height * 0.8)) }
+    };
+  })()`;
+}
+
+async function closeFollowerDialog(cdp) {
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
 }
 
 async function getOrOpenInstagramTab(cdpUrl, seed) {
