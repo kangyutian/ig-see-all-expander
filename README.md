@@ -1,4 +1,4 @@
-# IG See All Expander
+# IG See All Expander--ice开发
 
 Windows desktop tool for exporting Instagram handles from either the `Suggested for you -> See all` dialog or a profile's visible Followers dialog.
 
@@ -16,8 +16,8 @@ Both modes scroll only the dialog's internal list, require a stable-bottom confi
 
 Download from GitHub Releases:
 
-- `IG-See-All-Expander-Setup-x.x.x.exe`: installer, with selectable install directory.
-- `IG-See-All-Expander-Portable-x.x.x.exe`: portable build, no installation required.
+- `IG-See-All-Expander--ice开发-Setup-x.x.x.exe`: installer, with selectable install directory.
+- `IG-See-All-Expander--ice开发-Portable-x.x.x.exe`: portable build, no installation required.
 
 Both builds include the Node/Electron runtime. The target computer does not need Node.js, npm, or `start.bat`.
 

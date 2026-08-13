@@ -3,7 +3,7 @@ import path from "node:path";
 import { app, BrowserWindow, dialog, Menu, shell } from "electron";
 import { createAccessToken, startLocalServer } from "../server/index.mjs";
 
-const productName = "IG See All Expander";
+const productName = "IG See All Expander--ice开发";
 const localAppData = process.env.LOCALAPPDATA || app.getPath("appData");
 const dataDir = path.join(localAppData, productName);
 const outputDir = path.join(dataDir, "outputs");

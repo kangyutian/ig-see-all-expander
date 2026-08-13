@@ -1,6 +1,6 @@
 {
   "name": "ig-see-all-expander",
-  "productName": "IG See All Expander",
+  "productName": "IG See All Expander--ice开发",
   "version": "0.4.0",
   "description": "Windows desktop tool for full Instagram Suggested and Followers handle capture with profile enrichment.",
   "author": "kangyutian",
@@ -38,7 +38,7 @@
   },
   "build": {
     "appId": "com.kangyutian.igseeallexpander",
-    "productName": "IG See All Expander",
+    "productName": "IG See All Expander--ice开发",
     "asar": true,
     "directories": {
       "output": "release"
@@ -66,17 +66,17 @@
       ]
     },
     "nsis": {
-      "artifactName": "IG-See-All-Expander-Setup-${version}.${ext}",
+      "artifactName": "IG-See-All-Expander--ice开发-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowElevation": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
-      "shortcutName": "IG See All Expander"
+      "shortcutName": "IG See All Expander--ice开发"
     },
     "portable": {
-      "artifactName": "IG-See-All-Expander-Portable-${version}.${ext}"
+      "artifactName": "IG-See-All-Expander--ice开发-Portable-${version}.${ext}"
     }
   }
 }

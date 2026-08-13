@@ -133,6 +133,8 @@ test("local server protects APIs and exposes desktop system paths", async (conte
   assert.ok(fs.existsSync(path.join(info.connectorExtensionDir, "manifest.json")));
   assert.ok(fs.existsSync(path.join(info.connectorExtensionDir, "content.js")));
   const connectorManifest = JSON.parse(fs.readFileSync(path.join(info.connectorExtensionDir, "manifest.json"), "utf8"));
+  assert.equal(connectorManifest.name, "IG See All Expander--ice开发 Connector");
+  assert.equal(connectorManifest.action?.default_title, "IG See All Expander--ice开发 Connector");
   assert.deepEqual(connectorManifest.content_scripts?.[0]?.matches, ["https://www.instagram.com/*"]);
   const connectorBackground = fs.readFileSync(path.join(info.connectorExtensionDir, "background.js"), "utf8");
   assert.match(connectorBackground, /setInterval\(\(\) => sendHello\("heartbeat"\), 5000\)/);
@@ -158,5 +160,5 @@ test("local server protects APIs and exposes desktop system paths", async (conte
 
   const staticPage = await fetch(`${service.url}/`);
   assert.equal(staticPage.status, 200);
-  assert.match(await staticPage.text(), /IG See All Expander/i);
+  assert.match(await staticPage.text(), /IG See All Expander--ice开发/i);
 });

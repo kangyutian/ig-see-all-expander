@@ -137,7 +137,7 @@ async function handleRequest(req, res) {
     }
     if (url.pathname === "/api/system/info" && req.method === "GET") {
       return sendJson(res, 200, {
-        name: "IG See All Expander",
+        name: "IG See All Expander--ice开发",
         version: appVersion,
         mode: runtimeMode,
         dataDir,
@@ -155,7 +155,7 @@ async function handleRequest(req, res) {
 }
 
 export async function startLocalServer(options = {}) {
-  if (server?.listening) throw new Error("IG See All Expander local server is already running.");
+  if (server?.listening) throw new Error("IG See All Expander--ice开发 local server is already running.");
 
   distDir = path.resolve(options.distDir || path.join(sourceRootDir, "dist"));
   dataDir = path.resolve(options.dataDir || sourceRootDir);
@@ -382,9 +382,9 @@ function writeConnectorExtension(targetDir, secret) {
     `${JSON.stringify(
       {
         manifest_version: 3,
-        name: "IG See All Expander Connector",
+        name: "IG See All Expander--ice开发 Connector",
         version: appVersion,
-        description: "Connects an already-open Instagram tab in Chrome to the local IG See All Expander app.",
+        description: "Connects an already-open Instagram tab in Chrome to the local IG See All Expander--ice开发 app.",
         permissions: ["tabs", "cookies", "debugger"],
         host_permissions: ["https://www.instagram.com/*", "http://127.0.0.1/*", "ws://127.0.0.1/*"],
         background: { service_worker: "background.js" },
@@ -395,7 +395,7 @@ function writeConnectorExtension(targetDir, secret) {
             run_at: "document_idle",
           },
         ],
-        action: { default_title: "IG See All Expander Connector" },
+        action: { default_title: "IG See All Expander--ice开发 Connector" },
       },
       null,
       2
@@ -412,7 +412,7 @@ function writeConnectorExtension(targetDir, secret) {
   fs.writeFileSync(
     path.join(targetDir, "README.txt"),
     [
-      "IG See All Expander Connector",
+      "IG See All Expander--ice开发 Connector",
       "",
       "Install once in Chrome:",
       "1. Open chrome://extensions/",
@@ -420,7 +420,7 @@ function writeConnectorExtension(targetDir, secret) {
       "3. Click Load unpacked",
       `4. Choose this folder: ${targetDir}`,
       "",
-      "After installing, keep your logged-in Instagram tab open and click Scan in IG See All Expander.",
+      "After installing, keep your logged-in Instagram tab open and click Scan in IG See All Expander--ice开发.",
     ].join("\n"),
     "utf8"
   );
@@ -1359,7 +1359,7 @@ async function openProfileContactDetails(cdp) {
 
 export async function writeExcel(filePath, rows) {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "IG See All Expander";
+  workbook.creator = "IG See All Expander--ice开发";
   workbook.created = new Date();
   const sheet = workbook.addWorksheet("handles");
   sheet.columns = [
@@ -2251,7 +2251,7 @@ function serveStatic(urlPath, res) {
   if (!filePath.startsWith(distDir) || !fs.existsSync(filePath)) {
     if (!fs.existsSync(path.join(distDir, "index.html"))) {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end("<h1>IG See All Expander</h1><p>Run <code>npm.cmd run build</code> first, then restart.</p>");
+      res.end("<h1>IG See All Expander--ice开发</h1><p>Run <code>npm.cmd run build</code> first, then restart.</p>");
       return;
     }
     return serveFile(path.join(distDir, "index.html"), res);
@@ -2502,7 +2502,7 @@ if (isDirectRun) {
   })
     .then(({ url }) => {
       const appUrl = `${url}/?token=${encodeURIComponent(token)}`;
-      console.log(`IG See All Expander running at ${appUrl}`);
+      console.log(`IG See All Expander--ice开发 running at ${appUrl}`);
       if (process.env.OPEN_BROWSER !== "0" && process.platform === "win32") {
         const child = spawn("rundll32.exe", ["url.dll,FileProtocolHandler", appUrl], {
           detached: true,
