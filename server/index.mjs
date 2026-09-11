@@ -1012,6 +1012,94 @@ export function parseInstagramCount(value) {
   return { value: Math.round(numeric * multiplier), exact: false, raw };
 }
 
+const SUGGESTED_TRIGGER_SEMANTIC_PATTERN = /similar accounts|discover people|suggested accounts|account suggestions|show account suggestions|recommendations?|suggest(?:ed|ions?)?(?:\s+for\s+you)?|people you may know|creators like you|find people|add people|\u63a8\u8350|\u76f8\u4f3c|\u53d1\u73b0\u7528\u6237|\u53ef\u80fd\u8ba4\u8bc6/i;
+const SUGGESTED_TRIGGER_PERSON_PLUS_PATTERN = /person[\s_-]*plus|user[\s_-]*plus|account[\s_-]*plus|profile[\s_-]*plus|add[\s_-]*(?:people|person|user)|discover[\s_-]*people|find[\s_-]*people/i;
+const SUGGESTED_TRIGGER_ACTION_ANCHOR_PATTERN = /^(?:follow(?:ing)?|message|edit profile|share profile|\u5173\u6ce8|\u6d88\u606f|\u7f16\u8f91\u4e2a\u4eba\u8d44\u6599|\u5206\u4eab\u4e2a\u4eba\u8d44\u6599)\b/i;
+const SUGGESTED_TRIGGER_EXCLUDED_PATTERN = /more options|options|menu|follow|message|share profile|\u5173\u6ce8|\u6d88\u606f|\u66f4\u591a|\u9009\u9879|\u83dc\u5355/i;
+
+function normalizeSuggestedTriggerText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeSuggestedTriggerRect(rect = {}) {
+  const left = Number(rect.left ?? rect.x ?? 0) || 0;
+  const top = Number(rect.top ?? rect.y ?? 0) || 0;
+  const width = Number(rect.width ?? 0) || 0;
+  const height = Number(rect.height ?? 0) || 0;
+  const right = Number(rect.right ?? left + width) || left + width;
+  const bottom = Number(rect.bottom ?? top + height) || top + height;
+  return { left, top, width, height, right, bottom };
+}
+
+function suggestedTriggerCandidateKey(candidate = {}) {
+  if (candidate.key !== undefined && candidate.key !== null && String(candidate.key).trim()) return String(candidate.key);
+  const rect = normalizeSuggestedTriggerRect(candidate.r || candidate.rect);
+  return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value)).join(":");
+}
+
+function normalizeSuggestedTriggerCandidate(candidate = {}) {
+  const text = normalizeSuggestedTriggerText(candidate.text);
+  const aria = normalizeSuggestedTriggerText(candidate.aria);
+  const title = normalizeSuggestedTriggerText(candidate.title);
+  const iconAttributes = normalizeSuggestedTriggerText(candidate.iconAttributes);
+  const combined = [text, aria, title, iconAttributes].filter(Boolean).join(" ");
+  const rect = normalizeSuggestedTriggerRect(candidate.r || candidate.rect);
+  const key = suggestedTriggerCandidateKey(candidate);
+  return {
+    ...candidate,
+    text,
+    aria,
+    title,
+    iconAttributes,
+    combined,
+    rect,
+    r: rect,
+    key,
+    label: normalizeSuggestedTriggerText(candidate.label) || normalizeSuggestedTriggerText([text, aria, title].filter(Boolean).join(" ")) || "[icon]",
+  };
+}
+
+export function selectSuggestedTriggerCandidates(inputCandidates = [], viewportWidth = 1200, excludedKeys = new Set()) {
+  const excluded = excludedKeys instanceof Set ? excludedKeys : new Set(Array.isArray(excludedKeys) ? excludedKeys : []);
+  const candidates = (Array.isArray(inputCandidates) ? inputCandidates : [])
+    .map(normalizeSuggestedTriggerCandidate)
+    .filter((candidate) => candidate.rect.width > 18 && candidate.rect.height > 18 && candidate.rect.bottom > 0 && candidate.rect.top < 760)
+    .filter((candidate) => !excluded.has(candidate.key));
+  const seen = new Set();
+  const appendUnique = (items) => items.filter((item) => {
+    if (seen.has(item.key)) return false;
+    seen.add(item.key);
+    return true;
+  });
+
+  const personPlus = candidates
+    .filter((candidate) => candidate.isPersonPlus === true || SUGGESTED_TRIGGER_PERSON_PLUS_PATTERN.test(candidate.combined))
+    .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  const semantic = candidates
+    .filter((candidate) => SUGGESTED_TRIGGER_SEMANTIC_PATTERN.test(candidate.combined))
+    .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  const actionAnchors = candidates
+    .filter((candidate) => SUGGESTED_TRIGGER_ACTION_ANCHOR_PATTERN.test(candidate.text || candidate.combined))
+    .sort((a, b) => a.rect.left - b.rect.left);
+  const actionRow = [];
+  for (const anchor of actionAnchors) {
+    for (const candidate of candidates) {
+      if (candidate.key === anchor.key || candidate.rect.left < anchor.rect.right - 6) continue;
+      if (Math.abs((candidate.rect.top + candidate.rect.height / 2) - (anchor.rect.top + anchor.rect.height / 2)) >= Math.max(34, anchor.rect.height)) continue;
+      if (candidate.rect.width > 90 || candidate.rect.height > 74) continue;
+      if (SUGGESTED_TRIGGER_EXCLUDED_PATTERN.test(candidate.combined)) continue;
+      actionRow.push(candidate);
+    }
+  }
+  actionRow.sort((a, b) => a.rect.left - b.rect.left || a.rect.top - b.rect.top);
+  const generic = candidates
+    .filter((candidate) => !SUGGESTED_TRIGGER_EXCLUDED_PATTERN.test(candidate.combined))
+    .filter((candidate) => candidate.rect.left > Number(viewportWidth || 1200) * 0.52 && candidate.rect.width <= 90 && candidate.rect.height <= 74)
+    .sort((a, b) => b.rect.left - a.rect.left || a.rect.top - b.rect.top);
+
+  return [...appendUnique(personPlus), ...appendUnique(semantic), ...appendUnique(actionRow), ...appendUnique(generic)];
+}
+
 function createJob({ seeds, session, outputName, captureMode = "suggested", enrichmentMode = "all" }) {
   const id = String(nextJobId++);
   const job = {
@@ -1388,13 +1476,16 @@ async function collectSuggestedSeed({ session, seed, seedSet, job }) {
     await sleep(6500);
     if (job.cancelled) return { seed, handles: [] };
 
-    let similarResult = await clickSimilarAccounts(cdp);
+    const attemptedTriggerKeys = new Set();
+    let similarResult = await clickSimilarAccounts(cdp, attemptedTriggerKeys);
     if (!similarResult?.clicked) throw new Error(`Similar accounts button was not found. ${similarResult?.diagnostic || ""}`.trim());
+    if (similarResult.key) attemptedTriggerKeys.add(similarResult.key);
 
     let suggestedState = await waitForSuggestedSurface(cdp, 12000);
     if (!suggestedState.dialogOpen && !suggestedState.hasSeeAll) {
       // Instagram occasionally ignores the first click while the profile header is still hydrating.
-      similarResult = await clickSimilarAccounts(cdp);
+      similarResult = await clickSimilarAccounts(cdp, attemptedTriggerKeys);
+      if (similarResult?.key) attemptedTriggerKeys.add(similarResult.key);
       if (similarResult?.clicked) suggestedState = await waitForSuggestedSurface(cdp, 8000);
     }
 
@@ -1849,8 +1940,8 @@ async function getOrOpenInstagramTab(cdpUrl, seed) {
   return opened;
 }
 
-async function clickSimilarAccounts(cdp) {
-  const result = await evaluate(cdp, `(() => {
+async function clickSimilarAccounts(cdp, excludedKeys = new Set()) {
+  const inspection = await evaluate(cdp, `(() => {
     window.scrollTo(0, 0);
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1200;
     const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
@@ -1858,49 +1949,47 @@ async function clickSimilarAccounts(cdp) {
     const candidates = [...document.querySelectorAll('[role=button], button, a')]
       .map((el) => {
         const r = el.getBoundingClientRect();
-        const descendantLabels = [...el.querySelectorAll('[aria-label], [title]')]
+        const attributeNodes = [el, ...el.querySelectorAll('svg, [role="img"], [aria-label], [title], [data-testid]')]
+          .slice(0, 12);
+        const descendantLabels = attributeNodes
           .slice(0, 8)
-          .map((node) => (node.getAttribute('aria-label') || node.getAttribute('title') || ''))
+          .map((node) => [
+            node.getAttribute('aria-label'),
+            node.getAttribute('title'),
+            node.getAttribute('data-testid'),
+            node.getAttribute('data-icon'),
+            node.getAttribute('class'),
+            node.getAttribute('id'),
+          ].filter(Boolean).join(' '))
           .join(' ');
+        const iconAttributes = normalize(descendantLabels);
         return {
-          el,
           text: normalize(el.innerText || el.textContent),
           aria: normalize((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + descendantLabels),
-          r
+          iconAttributes,
+          isPersonPlus: /person[\\s_-]*plus|user[\\s_-]*plus|account[\\s_-]*plus|profile[\\s_-]*plus|add[\\s_-]*(?:people|person|user)|discover[\\s_-]*people|find[\\s_-]*people/i.test(iconAttributes),
+          r: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }
         };
       })
       .filter((x) => visible(x.r) && x.r.top < Math.min(window.innerHeight * 0.62, 560));
-    const semanticPattern = /similar accounts|discover people|suggested accounts|account suggestions|show account suggestions|recommendations|\\u63a8\\u8350|\\u76f8\\u4f3c|\\u53d1\\u73b0\\u7528\\u6237/i;
-    const excludedPattern = /more options|options|menu|follow|message|share profile|\\u5173\\u6ce8|\\u6d88\\u606f|\\u66f4\\u591a|\\u9009\\u9879|\\u83dc\\u5355/i;
-    const messageButton = candidates.find((x) => /^(message|\\u6d88\\u606f)$|send message|\\u53d1\\u9001\\u6d88\\u606f/i.test(x.text + ' ' + x.aria));
-    const spatialCandidates = messageButton
-      ? candidates
-          .filter((x) => x.r.left >= messageButton.r.right - 6)
-          .filter((x) => Math.abs((x.r.top + x.r.height / 2) - (messageButton.r.top + messageButton.r.height / 2)) < Math.max(34, messageButton.r.height))
-          .filter((x) => x.r.width <= 90 && x.r.height <= 74 && !excludedPattern.test(x.text + ' ' + x.aria))
-          .sort((a, b) => a.r.left - b.r.left)
-      : [];
-    const target =
-      candidates.find((x) => semanticPattern.test(x.text + ' ' + x.aria)) ||
-      spatialCandidates[0] ||
-      candidates
-        .filter((x) => !excludedPattern.test(x.text + ' ' + x.aria))
-        .filter((x) => x.r.left > viewportWidth * 0.52 && x.r.width <= 90 && x.r.height <= 74)
-        .sort((a, b) => b.r.left - a.r.left)[0];
-    if (!target) {
-      return {
-        clicked: false,
-        diagnostic: 'Visible profile controls: ' + candidates.slice(0, 12).map((x) => normalize(x.text + ' ' + x.aria) || '[icon]').join(' | ')
-      };
-    }
-    return {
-      clicked: true,
-      x: target.r.left + target.r.width / 2,
-      y: target.r.top + target.r.height / 2,
-      label: normalize(target.text + ' ' + target.aria) || '[icon]'
-    };
+    return { viewportWidth, candidates };
   })()`);
-  if (!result?.clicked) return result || { clicked: false };
+  const candidates = Array.isArray(inspection?.candidates) ? inspection.candidates : [];
+  const ordered = selectSuggestedTriggerCandidates(candidates, inspection?.viewportWidth, excludedKeys);
+  const target = ordered[0];
+  if (!target) {
+    return {
+      clicked: false,
+      diagnostic: 'Visible profile controls: ' + candidates.slice(0, 12).map((candidate) => normalizeSuggestedTriggerText([candidate.text, candidate.aria, candidate.title].filter(Boolean).join(' ')) || '[icon]').join(' | ')
+    };
+  }
+  const result = {
+    clicked: true,
+    x: target.rect.left + target.rect.width / 2,
+    y: target.rect.top + target.rect.height / 2,
+    label: target.label,
+    key: target.key,
+  };
   await mouseClick(cdp, result);
   await sleep(450);
   return result;
@@ -1912,7 +2001,7 @@ async function clickSeeAll(cdp, timeoutMs = 10000) {
     const result = await evaluate(cdp, `(() => {
       const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const seeAllPattern = /^(see all|view all|show all|\\u67e5\\u770b\\u5168\\u90e8|\\u67e5\\u770b\\u6240\\u6709|\\u5168\\u90e8\\u67e5\\u770b|ver todo|voir tout|voir tous|ver tudo|mostra tutti|alle ansehen|alle anzeigen|\\ubaa8\\ub450 \\ubcf4\\uae30)$/i;
-      const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+      const titlePattern = /suggested for you|suggestions for you|recommended for you|discover people|people you may know|similar accounts|creators like you|find people|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|\\u53d1\\u73b0\\u7528\\u6237|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
       const all = [...document.querySelectorAll('a, button, [role=button], span, div')];
       const headings = all.filter((el) => titlePattern.test(normalize(el.innerText || el.textContent)));
       const scored = all
@@ -1965,7 +2054,7 @@ async function waitForSuggestedSurface(cdp, timeoutMs) {
 async function inspectSuggestedSurface(cdp) {
   return evaluate(cdp, `(() => {
     const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+    const titlePattern = /suggested for you|suggestions for you|recommended for you|discover people|people you may know|similar accounts|creators like you|find people|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|\\u53d1\\u73b0\\u7528\\u6237|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const seeAllPattern = /^(see all|view all|show all|\\u67e5\\u770b\\u5168\\u90e8|\\u67e5\\u770b\\u6240\\u6709|\\u5168\\u90e8\\u67e5\\u770b|ver todo|voir tout|voir tous|ver tudo|mostra tutti|alle ansehen|alle anzeigen|\\ubaa8\\ub450 \\ubcf4\\uae30)$/i;
     const dialogs = [...document.querySelectorAll('[role="dialog"]')];
     const dialogOpen = dialogs.some((el) => titlePattern.test(normalize(el.innerText || el.textContent)));
@@ -2005,7 +2094,7 @@ async function extractSuggestedModal(cdp, seed, seedSet) {
       const pageHandle = ${JSON.stringify(seed)};
       const seedSet = new Set(${JSON.stringify([...seedSet])});
       const reserved = new Set(${JSON.stringify([...reservedHandles])});
-      const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+      const titlePattern = /suggested for you|suggestions for you|recommended for you|discover people|people you may know|similar accounts|creators like you|find people|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|\\u53d1\\u73b0\\u7528\\u6237|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
       const dialog = [...document.querySelectorAll('[role="dialog"]')]
         .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
       if (!dialog) return [];
@@ -2032,7 +2121,7 @@ async function extractSuggestedModal(cdp, seed, seedSet) {
 
 async function scrollSuggestedModal(cdp) {
   const beforeState = await evaluate(cdp, `(() => {
-    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+      const titlePattern = /suggested for you|suggestions for you|recommended for you|discover people|people you may know|similar accounts|creators like you|find people|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|\\u53d1\\u73b0\\u7528\\u6237|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
       .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
     if (!dialog) return { dialogFound: false, changed: false, atBottom: false, scrollTop: -1, scrollHeight: 0, clientHeight: 0, rect: null };
@@ -2065,7 +2154,7 @@ async function scrollSuggestedModal(cdp) {
     .catch(() => {});
   await sleep(120);
   const afterState = await evaluate(cdp, `(() => {
-    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+    const titlePattern = /suggested for you|suggestions for you|recommended for you|discover people|people you may know|similar accounts|creators like you|find people|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|\\u53d1\\u73b0\\u7528\\u6237|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
       .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
     if (!dialog) return { dialogFound: false, changed: false, atBottom: false, scrollTop: -1, scrollHeight: 0, clientHeight: 0 };
@@ -2089,7 +2178,7 @@ async function scrollSuggestedModal(cdp) {
 
 async function closeDialog(cdp) {
   await evaluate(cdp, `(() => {
-    const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+    const titlePattern = /suggested for you|suggestions for you|recommended for you|discover people|people you may know|similar accounts|creators like you|find people|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|\\u53d1\\u73b0\\u7528\\u6237|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
     const dialog = [...document.querySelectorAll('[role="dialog"]')]
       .find((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
     if (!dialog) return false;
@@ -2118,7 +2207,7 @@ async function waitForDialog(cdp, timeoutMs) {
     const found = await evaluate(
       cdp,
       `(() => {
-        const titlePattern = /suggested for you|suggestions for you|recommended for you|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
+        const titlePattern = /suggested for you|suggestions for you|recommended for you|discover people|people you may know|similar accounts|creators like you|find people|\\u4e3a\\u4f60\\u63a8\\u8350|\\u63a8\\u8350\\u7ed9\\u4f60|\\u4f60\\u53ef\\u80fd\\u8ba4\\u8bc6|\\u53d1\\u73b0\\u7528\\u6237|sugerencias para ti|suggestions pour vous|vorschl\\u00e4ge f\\u00fcr dich/i;
         return [...document.querySelectorAll('[role="dialog"]')].some((el) => titlePattern.test((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()));
       })()`
     ).catch(() => false);

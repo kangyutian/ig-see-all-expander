@@ -9,6 +9,7 @@ import {
   isOpenConnectorClient,
   parseInstagramCount,
   resolveEnrichmentLimit,
+  selectSuggestedTriggerCandidates,
   startLocalServer,
   updateBottomConfirmation,
   writeExcel,
@@ -51,6 +52,40 @@ test("Instagram follower counts preserve exact values and parse abbreviated labe
   assert.deepEqual(parseInstagramCount("51.6\u4e07\u7c89\u4e1d"), { value: 516000, exact: false, raw: "51.6\u4e07\u7c89\u4e1d" });
   assert.deepEqual(parseInstagramCount("1.2M followers"), { value: 1200000, exact: false, raw: "1.2M followers" });
   assert.equal(parseInstagramCount("Followers"), null);
+});
+
+test("suggested trigger selection prioritizes the person-plus recommendation control", () => {
+  const candidates = [
+    { key: "follow", text: "Follow", aria: "", r: { left: 100, right: 190, top: 120, bottom: 160, width: 90, height: 40 } },
+    { key: "message", text: "Message", aria: "", r: { left: 200, right: 290, top: 120, bottom: 160, width: 90, height: 40 } },
+    { key: "person-plus", text: "", aria: "", isPersonPlus: true, r: { left: 300, right: 340, top: 120, bottom: 160, width: 40, height: 40 } },
+    { key: "menu", text: "", aria: "More options", r: { left: 350, right: 390, top: 120, bottom: 160, width: 40, height: 40 } },
+  ];
+
+  assert.equal(selectSuggestedTriggerCandidates(candidates, 800)[0].key, "person-plus");
+});
+
+test("suggested trigger selection uses the action-row fallback for an unlabeled recommendation icon", () => {
+  const candidates = [
+    { key: "follow", text: "Follow", aria: "", r: { left: 100, right: 190, top: 120, bottom: 160, width: 90, height: 40 } },
+    { key: "message", text: "Message", aria: "", r: { left: 200, right: 290, top: 120, bottom: 160, width: 90, height: 40 } },
+    { key: "person-plus", text: "", aria: "", r: { left: 300, right: 340, top: 120, bottom: 160, width: 40, height: 40 } },
+    { key: "menu", text: "", aria: "More options", r: { left: 350, right: 390, top: 120, bottom: 160, width: 40, height: 40 } },
+  ];
+
+  assert.equal(selectSuggestedTriggerCandidates(candidates, 800)[0].key, "person-plus");
+});
+
+test("suggested trigger retry excludes the control that was already clicked", () => {
+  const candidates = [
+    { key: "person-plus-one", text: "", aria: "", isPersonPlus: true, r: { left: 300, right: 340, top: 120, bottom: 160, width: 40, height: 40 } },
+    { key: "person-plus-two", text: "", aria: "", isPersonPlus: true, r: { left: 350, right: 390, top: 120, bottom: 160, width: 40, height: 40 } },
+  ];
+
+  const first = selectSuggestedTriggerCandidates(candidates, 800)[0];
+  const second = selectSuggestedTriggerCandidates(candidates, 800, new Set([first.key]))[0];
+  assert.equal(first.key, "person-plus-one");
+  assert.equal(second.key, "person-plus-two");
 });
 
 test("follower enrichment keeps none, first 500, and all as independent ranges", () => {
